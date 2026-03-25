@@ -1,0 +1,10 @@
+version: v2
+modules:
+  - path: proto
+    name: buf.build/binaryphile/toc
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE
