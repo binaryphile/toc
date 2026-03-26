@@ -2468,7 +2468,7 @@ func TestAllocTrackingMultipleWorkers(t *testing.T) {
 
 func TestAllocTrackingPanic(t *testing.T) {
 	// panicAllocFn allocates then panics. The post-sample should still
-	// fire because safeCall returns normally via defer/recover.
+	// fire because the decorated fn returns normally via defer/recover.
 	panicAllocFn := func(_ context.Context, _ int) (int, error) {
 		buf := make([]byte, 1<<20) // 1 MiB
 		allocSink.Store(buf)
@@ -2603,7 +2603,7 @@ func TestAllocTrackingConcurrentStats(t *testing.T) {
 func TestAllocTrackingPostSampleAfterCancel(t *testing.T) {
 	// Verify that allocations made before fn returns are still observed
 	// even when the context is canceled during fn execution. This tests
-	// that the post-sample fires after safeCall regardless of cancellation.
+	// that the post-sample fires after the decorated fn regardless of cancellation.
 	fnStarted := make(chan struct{})
 	fnRelease := make(chan struct{})
 
@@ -2638,6 +2638,275 @@ func TestAllocTrackingPostSampleAfterCancel(t *testing.T) {
 	stats := stage.Stats()
 	if stats.ObservedAllocBytes == 0 {
 		t.Fatal("ObservedAllocBytes = 0 after mid-flight cancel, want > 0")
+	}
+}
+
+// --- Characterization: processItem paths ---
+//
+// These tests lock down the exact counter semantics for each processItem
+// execution path, serving as a safety net for internal refactors.
+
+func TestProcessItemPath_Success(t *testing.T) {
+	stage := toc.Start(context.Background(), doubleIt, toc.Options[int]{})
+
+	stage.Submit(context.Background(), 5)
+	stage.CloseInput()
+	results := drain(stage)
+	stage.Wait()
+
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	val, err := results[0].Unpack()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != 10 {
+		t.Fatalf("got %d, want 10", val)
+	}
+
+	stats := stage.Stats()
+	if stats.Submitted != 1 {
+		t.Errorf("Submitted = %d, want 1", stats.Submitted)
+	}
+	if stats.Completed != 1 {
+		t.Errorf("Completed = %d, want 1", stats.Completed)
+	}
+	if stats.Failed != 0 {
+		t.Errorf("Failed = %d, want 0", stats.Failed)
+	}
+	if stats.Panicked != 0 {
+		t.Errorf("Panicked = %d, want 0", stats.Panicked)
+	}
+	if stats.Canceled != 0 {
+		t.Errorf("Canceled = %d, want 0", stats.Canceled)
+	}
+	if stats.ServiceTime <= 0 {
+		t.Errorf("ServiceTime = %v, want > 0", stats.ServiceTime)
+	}
+	if stats.InFlightWeight != 0 {
+		t.Errorf("InFlightWeight = %d, want 0 after completion", stats.InFlightWeight)
+	}
+	if stats.Admitted != 0 {
+		t.Errorf("Admitted = %d, want 0 after completion", stats.Admitted)
+	}
+}
+
+func TestProcessItemPath_Error_NoFailFast(t *testing.T) {
+	errBoom := errors.New("boom")
+	failFn := func(_ context.Context, _ int) (int, error) {
+		return 0, errBoom
+	}
+
+	stage := toc.Start(context.Background(), failFn, toc.Options[int]{
+		ContinueOnError: true,
+	})
+
+	stage.Submit(context.Background(), 1)
+	stage.CloseInput()
+	results := drain(stage)
+
+	if err := stage.Wait(); err != nil {
+		t.Fatalf("Wait() = %v, want nil with ContinueOnError", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	_, err := results[0].Unpack()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("result error = %v, want %v", err, errBoom)
+	}
+
+	stats := stage.Stats()
+	if stats.Completed != 1 {
+		t.Errorf("Completed = %d, want 1", stats.Completed)
+	}
+	if stats.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", stats.Failed)
+	}
+	if stats.Panicked != 0 {
+		t.Errorf("Panicked = %d, want 0", stats.Panicked)
+	}
+	if stats.Canceled != 0 {
+		t.Errorf("Canceled = %d, want 0", stats.Canceled)
+	}
+	if stats.Admitted != 0 {
+		t.Errorf("Admitted = %d, want 0 after completion", stats.Admitted)
+	}
+}
+
+func TestProcessItemPath_Error_FailFast_First(t *testing.T) {
+	errBoom := errors.New("boom")
+	failFn := func(_ context.Context, _ int) (int, error) {
+		return 0, errBoom
+	}
+
+	stage := toc.Start(context.Background(), failFn, toc.Options[int]{})
+
+	stage.Submit(context.Background(), 1)
+	stage.CloseInput()
+	drain(stage)
+
+	err := stage.Wait()
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("Wait() = %v, want %v", err, errBoom)
+	}
+
+	stats := stage.Stats()
+	if stats.Failed < 1 {
+		t.Errorf("Failed = %d, want >= 1", stats.Failed)
+	}
+	if stats.Admitted != 0 {
+		t.Errorf("Admitted = %d, want 0 after completion", stats.Admitted)
+	}
+
+	// After fail-fast, subsequent submits should fail.
+	if err := stage.Submit(context.Background(), 2); !errors.Is(err, toc.ErrClosed) {
+		t.Errorf("Submit after fail-fast = %v, want ErrClosed", err)
+	}
+}
+
+func TestProcessItemPath_Error_FailFast_Second(t *testing.T) {
+	var calls atomic.Int64
+	errFirst := errors.New("first")
+	errSecond := errors.New("second")
+	release := make(chan struct{})
+
+	failFn := func(_ context.Context, _ int) (int, error) {
+		n := calls.Add(1)
+		<-release
+		if n == 1 {
+			return 0, errFirst
+		}
+		return 0, errSecond
+	}
+
+	stage := toc.Start(context.Background(), failFn, toc.Options[int]{
+		Workers:  2,
+		Capacity: 10,
+	})
+
+	stage.Submit(context.Background(), 1)
+	stage.Submit(context.Background(), 2)
+	stage.CloseInput()
+
+	// Release both workers simultaneously — race for first error.
+	close(release)
+	drain(stage)
+
+	err := stage.Wait()
+	// Wait returns whichever error won the race.
+	if err == nil {
+		t.Fatal("Wait() = nil, want error")
+	}
+
+	stats := stage.Stats()
+	// At least one failed, possibly both.
+	if stats.Failed < 1 {
+		t.Errorf("Failed = %d, want >= 1", stats.Failed)
+	}
+	if stats.Admitted != 0 {
+		t.Errorf("Admitted = %d, want 0 after completion", stats.Admitted)
+	}
+}
+
+func TestProcessItemPath_Panic(t *testing.T) {
+	panicFn := func(_ context.Context, _ int) (int, error) {
+		panic("kaboom")
+	}
+
+	stage := toc.Start(context.Background(), panicFn, toc.Options[int]{
+		ContinueOnError: true,
+	})
+
+	stage.Submit(context.Background(), 1)
+	stage.CloseInput()
+	results := drain(stage)
+	stage.Wait()
+
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	_, err := results[0].Unpack()
+	if err == nil {
+		t.Fatal("expected error from panic")
+	}
+
+	var pe *rslt.PanicError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error is %T, want *rslt.PanicError", err)
+	}
+	if len(pe.Stack) == 0 {
+		t.Error("expected non-empty stack trace")
+	}
+
+	stats := stage.Stats()
+	if stats.Completed != 1 {
+		t.Errorf("Completed = %d, want 1 (panics count as completed)", stats.Completed)
+	}
+	if stats.Failed != 1 {
+		t.Errorf("Failed = %d, want 1 (panics count as failed)", stats.Failed)
+	}
+	if stats.Panicked != 1 {
+		t.Errorf("Panicked = %d, want 1", stats.Panicked)
+	}
+	if stats.Canceled != 0 {
+		t.Errorf("Canceled = %d, want 0", stats.Canceled)
+	}
+	if stats.Admitted != 0 {
+		t.Errorf("Admitted = %d, want 0 after completion", stats.Admitted)
+	}
+	if stats.InFlightWeight != 0 {
+		t.Errorf("InFlightWeight = %d, want 0 after completion", stats.InFlightWeight)
+	}
+}
+
+func TestProcessItemPath_PreCallCanceled(t *testing.T) {
+	fnCalled := make(chan struct{})
+	release := make(chan struct{})
+
+	blockFn := func(_ context.Context, n int) (int, error) {
+		close(fnCalled)
+		<-release
+		return n, nil
+	}
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	stage := toc.Start(ctx, blockFn, toc.Options[int]{Capacity: 10})
+
+	// Submit one item that will block in fn.
+	stage.Submit(context.Background(), 1)
+	<-fnCalled
+
+	// Submit a second item that will be buffered.
+	stage.Submit(context.Background(), 2)
+
+	// Cancel the stage — the buffered item hits pre-call cancellation.
+	causeErr := errors.New("test cancel")
+	cancel(causeErr)
+
+	// Let the first item complete.
+	close(release)
+
+	results := drain(stage)
+	stage.Wait()
+
+	// Should have 2 results: one from fn, one from cancellation path.
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+
+	stats := stage.Stats()
+	if stats.Canceled < 1 {
+		t.Errorf("Canceled = %d, want >= 1", stats.Canceled)
+	}
+	// The completed item went through fn; the canceled one did not.
+	if stats.Completed < 1 {
+		t.Errorf("Completed = %d, want >= 1", stats.Completed)
+	}
+	if stats.Admitted != 0 {
+		t.Errorf("Admitted = %d, want 0 after completion", stats.Admitted)
 	}
 }
 

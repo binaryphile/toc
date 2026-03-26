@@ -5,13 +5,13 @@ import (
 	"container/list"
 	"context"
 	"errors"
-	"runtime/debug"
 	"runtime/metrics"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	hdrhistogram "github.com/HdrHistogram/hdrhistogram-go"
+	"github.com/binaryphile/fluentfp/call"
 	"github.com/binaryphile/fluentfp/rslt"
 )
 
@@ -447,8 +447,19 @@ func start[T, R any](
 		if s.trackServiceTimeDist {
 			hist = newHist()
 		}
-		s.workerHandles[i] = &managedWorker{cancel: wCancel, exited: exited, hist: hist}
-		go s.worker(stageCtx, wCtx, fn, failFast, s.workerHandles[i])
+		mw := &managedWorker{cancel: wCancel, exited: exited, hist: hist}
+		s.workerHandles[i] = mw
+		var onDur func(time.Duration)
+		if mw.hist != nil {
+			onDur = func(d time.Duration) {
+				workerRecord(mw, d, &s.svcTimeUnderflow, &s.svcTimeOverflow)
+			}
+		}
+		decoratedFn := call.From(fn).With(
+			PanicRecovery[T, R](&s.panicked),
+			ServiceTiming[T, R](&s.serviceNs, onDur),
+		)
+		go s.worker(stageCtx, wCtx, decoratedFn, failFast, mw)
 	}
 
 	if feeder != nil {
@@ -1220,7 +1231,17 @@ func (s *Stage[T, R]) SetWorkers(n int) (int, error) {
 			mw := &managedWorker{cancel: rCancel, exited: exited, hist: hist}
 			s.workerHandles = append(s.workerHandles, mw)
 			s.wg.Add(1)
-			go s.worker(s.run.ctx, rCtx, s.run.fn, s.run.failFast, mw)
+			var onDur func(time.Duration)
+			if mw.hist != nil {
+				onDur = func(d time.Duration) {
+					workerRecord(mw, d, &s.svcTimeUnderflow, &s.svcTimeOverflow)
+				}
+			}
+			decoratedFn := call.From(s.run.fn).With(
+				PanicRecovery[T, R](&s.panicked),
+				ServiceTiming[T, R](&s.serviceNs, onDur),
+			)
+			go s.worker(s.run.ctx, rCtx, decoratedFn, s.run.failFast, mw)
 		}
 	} else if n < live {
 		// Scale down: cancel excess workers LIFO (newest first).
@@ -1329,7 +1350,7 @@ func (s *Stage[T, R]) worker(
 			return
 		}
 
-		s.processItem(stageCtx, fn, failFast, q, samples[:], mw)
+		s.processItem(stageCtx, fn, failFast, q, samples[:])
 	}
 }
 
@@ -1347,7 +1368,6 @@ func (s *Stage[T, R]) processItem(
 	failFast bool,
 	q queued[T],
 	samples []metrics.Sample,
-	mw *managedWorker,
 ) {
 	defer s.releaseAdmission(q.weight)
 
@@ -1373,16 +1393,16 @@ func (s *Stage[T, R]) processItem(
 		objsBefore = samples[1].Value.Uint64()
 	}
 
-	serviceStart := time.Now()
+	// fn is decorated with PanicRecovery and ServiceTiming at worker spawn.
 	// Pass item's context to fn for trace propagation.
 	// stageCtx is checked above for cancellation; q.ctx carries
 	// the caller's trace span as parent.
-	result := s.safeCall(cmp.Or(q.ctx, ctx), fn, q.item)
-	svcDuration := time.Since(serviceStart)
-	s.serviceNs.Add(int64(svcDuration))
-
-	if mw.hist != nil {
-		workerRecord(mw, svcDuration, &s.svcTimeUnderflow, &s.svcTimeOverflow)
+	val, err := fn(cmp.Or(q.ctx, ctx), q.item)
+	var result rslt.Result[R]
+	if err != nil {
+		result = rslt.Err[R](err)
+	} else {
+		result = rslt.Ok(val)
 	}
 
 	if s.trackAllocs {
@@ -1400,7 +1420,7 @@ func (s *Stage[T, R]) processItem(
 	s.inFlightWeight.Add(-q.weight)
 	s.completed.Add(1)
 
-	if _, err := result.Unpack(); err != nil {
+	if err != nil {
 		s.failed.Add(1)
 
 		if failFast {
@@ -1423,23 +1443,3 @@ func (s *Stage[T, R]) processItem(
 	s.outputBlockedNs.Add(int64(time.Since(outStart)))
 }
 
-// safeCall invokes fn with panic recovery, returning a Result.
-func (s *Stage[T, R]) safeCall(
-	ctx context.Context,
-	fn func(context.Context, T) (R, error),
-	item T,
-) (result rslt.Result[R]) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.panicked.Add(1)
-			result = rslt.Err[R](&rslt.PanicError{Value: r, Stack: debug.Stack()})
-		}
-	}()
-
-	val, err := fn(ctx, item)
-	if err != nil {
-		return rslt.Err[R](err)
-	}
-
-	return rslt.Ok(val)
-}
