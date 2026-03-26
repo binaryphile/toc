@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/HdrHistogram/hdrhistogram-go v1.2.0
-	github.com/binaryphile/fluentfp v0.100.0
+	github.com/binaryphile/fluentfp v0.101.0
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.49.0
 	google.golang.org/protobuf v1.36.11
