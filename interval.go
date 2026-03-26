@@ -60,6 +60,7 @@ type IntervalStats struct {
 	// Interval time deltas (cumulative across all workers).
 	ServiceTimeDelta   time.Duration
 	IdleTimeDelta      time.Duration
+	StarvedTimeDelta   time.Duration // subset of IdleTimeDelta: starvation only (excludes startup/drain)
 	OutputBlockedDelta time.Duration
 
 	// Point-in-time gauges from curr snapshot.
@@ -190,6 +191,7 @@ func Delta(prev, curr Stats, elapsed time.Duration) IntervalStats {
 
 	is.ServiceTimeDelta = safeDeltaDuration(prev.ServiceTime, curr.ServiceTime, &is.ResetDetected)
 	is.IdleTimeDelta = safeDeltaDuration(prev.IdleTime, curr.IdleTime, &is.ResetDetected)
+	is.StarvedTimeDelta = safeDeltaDuration(prev.StarvedTime, curr.StarvedTime, &is.ResetDetected)
 	is.OutputBlockedDelta = safeDeltaDuration(prev.OutputBlockedTime, curr.OutputBlockedTime, &is.ResetDetected)
 
 	// Queue growth rate.

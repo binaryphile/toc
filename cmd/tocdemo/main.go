@@ -77,7 +77,7 @@ type scenarioResult struct {
 	throughput float64
 	peakWIP    int64
 	peakMemKB  int64
-	avgIdlePct float64
+	avgStarvedPct float64
 	elapsed    time.Duration
 }
 
@@ -157,7 +157,7 @@ func main() {
 		}
 		fmt.Println(renderSummaryLine(
 			results[i].name, results[i].throughput,
-			results[i].peakWIP, results[i].peakMemKB, results[i].avgIdlePct))
+			results[i].peakWIP, results[i].peakMemKB, results[i].avgStarvedPct))
 	}
 
 	fmt.Println()
@@ -217,15 +217,15 @@ func runScenario(sc scenario, seed int64, totalItems int, term terminal, staticM
 	defer ticker.Stop()
 
 	start := time.Now()
-	var prevXformIdle time.Duration
+	var prevXformStarved time.Duration
 	var prevXformCompleted int64
 	var prevStoreCompleted int64
 	var prevParseCompleted int64
 	prevSampleTime := start
 
 	var peakWIP int64
-	var idleSum float64
-	var idleSamples int
+	var starvedSum float64
+	var starvedSamples int
 
 	xformWorkers := sc.opts.xform.Workers
 	if xformWorkers <= 0 {
@@ -269,20 +269,20 @@ func runScenario(sc scenario, seed int64, totalItems int, term terminal, staticM
 			storeInFlight = 0
 		}
 
-		// Starvation proxy: IdleTime delta / (elapsed × workers).
-		idleDelta := xs.IdleTime - prevXformIdle
-		prevXformIdle = xs.IdleTime
-		idlePct := 0.0
+		// Starvation: StarvedTime delta / (elapsed × workers).
+		starvedDelta := xs.StarvedTime - prevXformStarved
+		prevXformStarved = xs.StarvedTime
+		starvedPct := 0.0
 		if sampleElapsed > 0 && sub > 0 && done < int64(totalItems) {
-			idlePct = idleDelta.Seconds() / (sampleElapsed.Seconds() * float64(xformWorkers)) * 100
-			if idlePct < 0 {
-				idlePct = 0
+			starvedPct = starvedDelta.Seconds() / (sampleElapsed.Seconds() * float64(xformWorkers)) * 100
+			if starvedPct < 0 {
+				starvedPct = 0
 			}
-			if idlePct > 100 {
-				idlePct = 100
+			if starvedPct > 100 {
+				starvedPct = 100
 			}
-			idleSum += idlePct
-			idleSamples++
+			starvedSum += starvedPct
+			starvedSamples++
 		}
 
 		// Transfer deltas.
@@ -300,7 +300,7 @@ func runScenario(sc scenario, seed int64, totalItems int, term terminal, staticM
 			done:         done,
 			total:        totalItems,
 			memoryKB:     pipelineWIP * itemWeightKB,
-			idlePct:      idlePct,
+			starvedPct:      starvedPct,
 			elapsed:      elapsed,
 			stages: [3]stageSnap{
 				{
@@ -325,8 +325,8 @@ func runScenario(sc scenario, seed int64, totalItems int, term terminal, staticM
 		}
 
 		if staticMode {
-			fmt.Printf("  %s  WIP:%-3d done:%-3d idle:%.0f%%\n",
-				fmtDur(elapsed), pipelineWIP, done, idlePct)
+			fmt.Printf("  %s  WIP:%-3d done:%-3d starved:%.0f%%\n",
+				fmtDur(elapsed), pipelineWIP, done, starvedPct)
 		} else {
 			term.home()
 			fmt.Print(renderFrame(f))
@@ -342,9 +342,9 @@ func runScenario(sc scenario, seed int64, totalItems int, term terminal, staticM
 	totalElapsed := time.Since(start)
 	throughput := float64(totalItems) / totalElapsed.Seconds()
 
-	avgIdle := 0.0
-	if idleSamples > 0 {
-		avgIdle = idleSum / float64(idleSamples)
+	avgStarved := 0.0
+	if starvedSamples > 0 {
+		avgStarved = starvedSum / float64(starvedSamples)
 	}
 
 	return scenarioResult{
@@ -352,7 +352,7 @@ func runScenario(sc scenario, seed int64, totalItems int, term terminal, staticM
 		throughput: throughput,
 		peakWIP:    peakWIP,
 		peakMemKB:  peakWIP * itemWeightKB,
-		avgIdlePct: avgIdle,
+		avgStarvedPct: avgStarved,
 		elapsed:    totalElapsed,
 	}
 }
@@ -364,7 +364,7 @@ func printComparison(results []scenarioResult) {
 	fmt.Println()
 
 	fmt.Printf("  %-28s │ %5s │ %8s │ %8s │ %12s │ %s\n",
-		"Scenario", "t/s", "peak WIP", "peak mem", "idle (approx)", "elapsed")
+		"Scenario", "t/s", "peak WIP", "peak mem", "starved", "elapsed")
 	fmt.Println("  " + strings.Repeat("─", 82))
 
 	for _, r := range results {
@@ -376,18 +376,18 @@ func printComparison(results []scenarioResult) {
 			wipColor = colorYellow
 		}
 
-		idleColor := colorGreen
-		if r.avgIdlePct > 10 {
-			idleColor = colorRed
-		} else if r.avgIdlePct > 5 {
-			idleColor = colorYellow
+		starvedColor := colorGreen
+		if r.avgStarvedPct > 10 {
+			starvedColor = colorRed
+		} else if r.avgStarvedPct > 5 {
+			starvedColor = colorYellow
 		}
 
 		fmt.Printf("  %-28s │ %5.0f │ %s%8d%s │ %7dMB │ %s%11.0f%%%s │ %s\n",
 			r.name, r.throughput,
 			wipColor, r.peakWIP, colorReset,
 			r.peakMemKB/1024,
-			idleColor, r.avgIdlePct, colorReset,
+			starvedColor, r.avgStarvedPct, colorReset,
 			r.elapsed.Round(time.Millisecond))
 	}
 
@@ -402,12 +402,12 @@ func printComparison(results []scenarioResult) {
 		fmt.Println()
 
 		fmt.Println("  1. IDENTIFY: deterministic-drum shows the baseline.")
-		fmt.Printf("     Throughput: %.0f/s, WIP: %d, idle: %.0f%%\n", s1.throughput, s1.peakWIP, s1.avgIdlePct)
+		fmt.Printf("     Throughput: %.0f/s, WIP: %d, starved: %.0f%%\n", s1.throughput, s1.peakWIP, s1.avgStarvedPct)
 		fmt.Println()
 
-		if s2.avgIdlePct > s1.avgIdlePct+2 {
+		if s2.avgStarvedPct > s1.avgStarvedPct+2 {
 			fmt.Println("  2. EXPLOIT needed: variable-no-buffer shows starvation.")
-			fmt.Printf("     Constraint idle jumped to %.0f%% — it has nothing to process.\n", s2.avgIdlePct)
+			fmt.Printf("     Constraint starved %.0f%% — it has nothing to process.\n", s2.avgStarvedPct)
 			if s2.throughput < s1.throughput*0.95 {
 				tputDrop := (1.0 - s2.throughput/s1.throughput) * 100
 				fmt.Printf("     Throughput dropped %.0f%% (%.0f/s → %.0f/s).\n", tputDrop, s1.throughput, s2.throughput)
@@ -415,9 +415,9 @@ func printComparison(results []scenarioResult) {
 			fmt.Println()
 		}
 
-		if s3.avgIdlePct < s2.avgIdlePct {
+		if s3.avgStarvedPct < s2.avgStarvedPct {
 			fmt.Println("  3. EXPLOIT delivered: variable-buffer protects the constraint.")
-			fmt.Printf("     Idle dropped from %.0f%% → %.0f%%.\n", s2.avgIdlePct, s3.avgIdlePct)
+			fmt.Printf("     Starvation dropped from %.0f%% → %.0f%%.\n", s2.avgStarvedPct, s3.avgStarvedPct)
 			if s3.throughput > s2.throughput*1.02 {
 				fmt.Printf("     Throughput recovered: %.0f/s → %.0f/s.\n", s2.throughput, s3.throughput)
 			}

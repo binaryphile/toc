@@ -2910,3 +2910,140 @@ func TestProcessItemPath_PreCallCanceled(t *testing.T) {
 	}
 }
 
+// --- StarvedTime ---
+
+func TestStarvedTime_NoStarvation(t *testing.T) {
+	// Pre-buffer items so workers never meaningfully wait for input.
+	stage := toc.Start(context.Background(), doubleIt, toc.Options[int]{Capacity: 10})
+
+	for i := 0; i < 5; i++ {
+		stage.Submit(context.Background(), i)
+	}
+	stage.CloseInput()
+	drain(stage)
+	stage.Wait()
+
+	stats := stage.Stats()
+	// Allow microseconds of select overhead between buffered items.
+	if stats.StarvedTime > 1*time.Millisecond {
+		t.Errorf("StarvedTime = %v, want < 1ms (items pre-buffered)", stats.StarvedTime)
+	}
+}
+
+func TestStarvedTime_Detected(t *testing.T) {
+	// Slow producer: worker will be idle between items after activation.
+	slowFn := func(_ context.Context, n int) (int, error) {
+		return n, nil
+	}
+
+	stage := toc.Start(context.Background(), slowFn, toc.Options[int]{Capacity: 10})
+
+	// Drain output concurrently to avoid backpressure deadlock.
+	go drain(stage)
+
+	// First item activates the stage.
+	stage.Submit(context.Background(), 1)
+
+	// Give worker time to process and re-enter select (now starving).
+	time.Sleep(30 * time.Millisecond)
+
+	// Second item ends the starvation.
+	stage.Submit(context.Background(), 2)
+
+	stage.CloseInput()
+	stage.Wait()
+
+	stats := stage.Stats()
+	if stats.StarvedTime < 10*time.Millisecond {
+		t.Errorf("StarvedTime = %v, want >= 10ms", stats.StarvedTime)
+	}
+	if stats.StarvedTime > stats.IdleTime {
+		t.Errorf("StarvedTime (%v) > IdleTime (%v), want StarvedTime <= IdleTime",
+			stats.StarvedTime, stats.IdleTime)
+	}
+}
+
+func TestStarvedTime_StartupExcluded(t *testing.T) {
+	// Worker spawns and waits. Then the first item arrives after a delay.
+	// The initial wait is startup, not starvation.
+	stage := toc.Start(context.Background(), doubleIt, toc.Options[int]{})
+
+	// Worker is idle but stage has no submitted items yet — startup.
+	time.Sleep(30 * time.Millisecond)
+
+	stage.Submit(context.Background(), 1)
+	stage.CloseInput()
+	drain(stage)
+	stage.Wait()
+
+	stats := stage.Stats()
+	// IdleTime should include the 30ms startup wait.
+	if stats.IdleTime < 20*time.Millisecond {
+		t.Errorf("IdleTime = %v, want >= 20ms", stats.IdleTime)
+	}
+	// StarvedTime should NOT include the startup wait.
+	if stats.StarvedTime > 5*time.Millisecond {
+		t.Errorf("StarvedTime = %v, want ~0 (startup should be excluded)", stats.StarvedTime)
+	}
+}
+
+func TestStarvedTime_DrainExcluded(t *testing.T) {
+	// After CloseInput, worker idles until channel closes.
+	// That drain time should not count as starvation.
+	fnStarted := make(chan struct{})
+	fnRelease := make(chan struct{})
+
+	blockFn := func(_ context.Context, n int) (int, error) {
+		close(fnStarted)
+		<-fnRelease
+		return n, nil
+	}
+
+	stage := toc.Start(context.Background(), blockFn, toc.Options[int]{})
+
+	stage.Submit(context.Background(), 1)
+	<-fnStarted // worker is executing fn
+
+	// Close input while worker is busy. When fn returns, worker re-enters
+	// select and sees closed=true — that idle time is drain, not starvation.
+	stage.CloseInput()
+
+	// Let some time pass so drain idle time accumulates when fn returns.
+	time.Sleep(20 * time.Millisecond)
+	close(fnRelease)
+
+	drain(stage)
+	stage.Wait()
+
+	stats := stage.Stats()
+	// StarvedTime should be ~0 since the only idle time after activation
+	// occurred after CloseInput (drain).
+	if stats.StarvedTime > 5*time.Millisecond {
+		t.Errorf("StarvedTime = %v, want ~0 (drain should be excluded)", stats.StarvedTime)
+	}
+}
+
+func TestStarvedTime_SubsetOfIdleTime(t *testing.T) {
+	// General invariant: StarvedTime <= IdleTime, always.
+	stage := toc.Start(context.Background(), doubleIt, toc.Options[int]{Capacity: 10})
+
+	// Drain concurrently.
+	go drain(stage)
+
+	// Some startup idle time.
+	time.Sleep(10 * time.Millisecond)
+
+	for i := 0; i < 3; i++ {
+		stage.Submit(context.Background(), i)
+		time.Sleep(5 * time.Millisecond) // starvation between items
+	}
+	stage.CloseInput()
+	stage.Wait()
+
+	stats := stage.Stats()
+	if stats.StarvedTime > stats.IdleTime {
+		t.Errorf("StarvedTime (%v) > IdleTime (%v), invariant violated",
+			stats.StarvedTime, stats.IdleTime)
+	}
+}
+

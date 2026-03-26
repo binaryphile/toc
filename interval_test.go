@@ -15,6 +15,7 @@ func TestDeltaHappyPath(t *testing.T) {
 		Canceled:    2,
 		ServiceTime: 10 * time.Second,
 		IdleTime:    2 * time.Second,
+		StarvedTime: 500 * time.Millisecond,
 		BufferedDepth: 3,
 		QueueCapacity: 10,
 		ActiveWorkers: 4,
@@ -27,6 +28,7 @@ func TestDeltaHappyPath(t *testing.T) {
 		Canceled:    4,
 		ServiceTime: 30 * time.Second,
 		IdleTime:    4 * time.Second,
+		StarvedTime: 1500 * time.Millisecond,
 		BufferedDepth: 7,
 		QueueCapacity: 10,
 		ActiveWorkers: 4,
@@ -63,6 +65,9 @@ func TestDeltaHappyPath(t *testing.T) {
 	}
 	if is.ServiceTimeDelta != 20*time.Second {
 		t.Errorf("ServiceTimeDelta = %v, want 20s", is.ServiceTimeDelta)
+	}
+	if is.StarvedTimeDelta != time.Second {
+		t.Errorf("StarvedTimeDelta = %v, want 1s", is.StarvedTimeDelta)
 	}
 	// MeanServiceTime = 20s / 100 = 200ms
 	if is.MeanServiceTime != 200*time.Millisecond {

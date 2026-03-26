@@ -188,6 +188,7 @@ type Stats struct {
 
 	ServiceTime       time.Duration // cumulative time fn was executing
 	IdleTime          time.Duration // cumulative worker time waiting for input (includes startup and tail wait)
+	StarvedTime time.Duration // subset of IdleTime: cumulative worker-time (summed across workers) blocked on empty input after stage activation (first successful enqueue) and before observed drain (CloseInput). Classified by stage state at wait entry, not wake time — a wait that begins before closure may still be counted. Includes synchronous handoff waits for unbuffered (Capacity: 0) stages.
 	OutputBlockedTime time.Duration // cumulative worker time blocked handing result to consumer (unbuffered out channel)
 
 	BufferedDepth  int64 // approximate items in queue; may transiently be negative mid-flight; 0 when Capacity is 0 (unbuffered)
@@ -322,6 +323,7 @@ type Stage[T, R any] struct {
 
 	serviceNs       atomic.Int64
 	idleNs          atomic.Int64
+	starvedNs       atomic.Int64
 	outputBlockedNs atomic.Int64
 
 	inFlightWeight atomic.Int64
@@ -985,6 +987,7 @@ func (s *Stage[T, R]) Stats() Stats {
 		Dropped:              s.dropped.Load(),
 		ServiceTime:          time.Duration(s.serviceNs.Load()),
 		IdleTime:             time.Duration(s.idleNs.Load()),
+		StarvedTime:          time.Duration(s.starvedNs.Load()),
 		OutputBlockedTime:    time.Duration(s.outputBlockedNs.Load()),
 		BufferedDepth:        depth,
 		InFlightWeight:       s.inFlightWeight.Load(),
@@ -1330,6 +1333,12 @@ func (s *Stage[T, R]) worker(
 
 	for {
 		idleStart := time.Now()
+		// Classify idle wait by stage state at entry, not wake time.
+		// activated: at least one item has been enqueued (stage is active).
+		// draining: CloseInput has been called (no more input coming).
+		activated := s.submitted.Load() > 0
+		draining := s.closed.Load()
+
 		var q queued[T]
 		var ok bool
 
@@ -1340,11 +1349,19 @@ func (s *Stage[T, R]) worker(
 		select {
 		case q, ok = <-s.in:
 		case <-retireCtx.Done():
-			s.idleNs.Add(int64(time.Since(idleStart)))
+			elapsed := int64(time.Since(idleStart))
+			s.idleNs.Add(elapsed)
+			if activated && !draining {
+				s.starvedNs.Add(elapsed)
+			}
 			return
 		}
 
-		s.idleNs.Add(int64(time.Since(idleStart)))
+		elapsed := int64(time.Since(idleStart))
+		s.idleNs.Add(elapsed)
+		if activated && !draining {
+			s.starvedNs.Add(elapsed)
+		}
 
 		if !ok {
 			return

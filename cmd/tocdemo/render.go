@@ -38,7 +38,7 @@ type frameData struct {
 	done         int64
 	total        int
 	memoryKB     int64
-	idlePct      float64 // constraint idle proxy, 0-100
+	starvedPct      float64 // constraint starvation %, 0-100
 	elapsed      time.Duration
 }
 
@@ -105,14 +105,14 @@ func renderFrame(f frameData) string {
 
 	writeBlank(&b)
 
-	// Constraint idle indicator
-	idleStr := fmt.Sprintf(" constraint idle: %.0f%% (approx)", f.idlePct)
-	if f.idlePct > 10 {
-		idleStr += "  " + colorRed + "← STARVING" + colorReset
-	} else if f.idlePct >= 0 {
-		idleStr += "  " + colorGreen + "✓ protected" + colorReset
+	// Constraint starvation indicator
+	starvedStr := fmt.Sprintf(" constraint starved: %.0f%%", f.starvedPct)
+	if f.starvedPct > 10 {
+		starvedStr += "  " + colorRed + "← STARVING" + colorReset
+	} else if f.starvedPct >= 0 {
+		starvedStr += "  " + colorGreen + "✓ protected" + colorReset
 	}
-	writeLine(&b, idleStr)
+	writeLine(&b, starvedStr)
 
 	// Stats
 	tputPerSec := float64(f.stages[2].transferred) / tickRate.Seconds()
@@ -256,7 +256,7 @@ func fmtDur(d time.Duration) string {
 }
 
 // renderSummaryLine produces a one-line result for the main screen.
-func renderSummaryLine(name string, throughput float64, peakWIP int64, peakMemKB int64, idlePct float64) string {
+func renderSummaryLine(name string, throughput float64, peakWIP int64, peakMemKB int64, starvedPct float64) string {
 	wipColor := colorGreen
 	switch {
 	case peakWIP > 100:
@@ -264,10 +264,10 @@ func renderSummaryLine(name string, throughput float64, peakWIP int64, peakMemKB
 	case peakWIP > 30:
 		wipColor = colorYellow
 	}
-	return fmt.Sprintf("  %s%-28s%s  t/s: %5.0f  peak WIP: %s%3d%s  mem: %dMB  idle: %.0f%%",
+	return fmt.Sprintf("  %s%-28s%s  t/s: %5.0f  peak WIP: %s%3d%s  mem: %dMB  starved: %.0f%%",
 		colorBold, name, colorReset,
 		throughput,
 		wipColor, peakWIP, colorReset,
 		peakMemKB/1024,
-		idlePct)
+		starvedPct)
 }
