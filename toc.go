@@ -192,7 +192,8 @@ type Stats struct {
 	OutputBlockedTime time.Duration // cumulative worker time blocked handing result to consumer (unbuffered out channel)
 
 	BufferedDepth  int64 // approximate items in queue; may transiently be negative mid-flight; 0 when Capacity is 0 (unbuffered)
-	InFlightWeight int64 // weighted cost of items currently in fn (stats-only, not admission)
+	InFlightWeight  int64 // weighted cost of items currently in fn (stats-only, not admission)
+	CompletedWeight int64 // cumulative weight of completed items; equals Completed when Options.Weight is nil
 	QueueCapacity  int   // configured capacity
 
 	Paused        bool  // true if admission is paused via PauseAdmission
@@ -326,7 +327,8 @@ type Stage[T, R any] struct {
 	starvedNs       atomic.Int64
 	outputBlockedNs atomic.Int64
 
-	inFlightWeight atomic.Int64
+	inFlightWeight  atomic.Int64
+	completedWeight atomic.Int64
 	allocBytes     atomic.Uint64
 	allocObjects   atomic.Uint64
 
@@ -991,6 +993,7 @@ func (s *Stage[T, R]) Stats() Stats {
 		OutputBlockedTime:    time.Duration(s.outputBlockedNs.Load()),
 		BufferedDepth:        depth,
 		InFlightWeight:       s.inFlightWeight.Load(),
+		CompletedWeight:     s.completedWeight.Load(),
 		QueueCapacity:        s.capacity,
 		Paused:               paused,
 		MaxWIP:               maxWIP,
@@ -1435,6 +1438,7 @@ func (s *Stage[T, R]) processItem(
 	}
 
 	s.inFlightWeight.Add(-q.weight)
+	s.completedWeight.Add(q.weight)
 	s.completed.Add(1)
 
 	if err != nil {

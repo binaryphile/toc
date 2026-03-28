@@ -9,30 +9,32 @@ import (
 
 func TestDeltaHappyPath(t *testing.T) {
 	prev := toc.Stats{
-		Submitted:   100,
-		Completed:   90,
-		Failed:      5,
-		Canceled:    2,
-		ServiceTime: 10 * time.Second,
-		IdleTime:    2 * time.Second,
-		StarvedTime: 500 * time.Millisecond,
-		BufferedDepth: 3,
-		QueueCapacity: 10,
-		ActiveWorkers: 4,
-		TargetWorkers: 4,
+		Submitted:       100,
+		Completed:       90,
+		CompletedWeight: 270, // 90 items × weight 3
+		Failed:          5,
+		Canceled:        2,
+		ServiceTime:     10 * time.Second,
+		IdleTime:        2 * time.Second,
+		StarvedTime:     500 * time.Millisecond,
+		BufferedDepth:   3,
+		QueueCapacity:   10,
+		ActiveWorkers:   4,
+		TargetWorkers:   4,
 	}
 	curr := toc.Stats{
-		Submitted:   200,
-		Completed:   190,
-		Failed:      15,
-		Canceled:    4,
-		ServiceTime: 30 * time.Second,
-		IdleTime:    4 * time.Second,
-		StarvedTime: 1500 * time.Millisecond,
-		BufferedDepth: 7,
-		QueueCapacity: 10,
-		ActiveWorkers: 4,
-		TargetWorkers: 4,
+		Submitted:       200,
+		Completed:       190,
+		CompletedWeight: 570, // 190 items × weight 3
+		Failed:          15,
+		Canceled:        4,
+		ServiceTime:     30 * time.Second,
+		IdleTime:        4 * time.Second,
+		StarvedTime:     1500 * time.Millisecond,
+		BufferedDepth:   7,
+		QueueCapacity:   10,
+		ActiveWorkers:   4,
+		TargetWorkers:   4,
 	}
 
 	is := toc.Delta(prev, curr, 2*time.Second)
@@ -45,6 +47,9 @@ func TestDeltaHappyPath(t *testing.T) {
 	}
 	if is.ItemsCompleted != 100 {
 		t.Errorf("ItemsCompleted = %d, want 100", is.ItemsCompleted)
+	}
+	if is.CompletedWeightDelta != 300 { // 570 - 270
+		t.Errorf("CompletedWeightDelta = %d, want 300", is.CompletedWeightDelta)
 	}
 	if is.ItemsFailed != 10 {
 		t.Errorf("ItemsFailed = %d, want 10", is.ItemsFailed)

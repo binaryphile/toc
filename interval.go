@@ -45,9 +45,10 @@ type IntervalStats struct {
 
 	// Interval deltas (cumulative counter differences).
 	ItemsSubmitted int64
-	ItemsCompleted int64 // includes failed+panicked (same as Stats.Completed)
-	ItemsFailed    int64 // subset of completed
-	ItemsCanceled  int64
+	ItemsCompleted       int64 // includes failed+panicked (same as Stats.Completed)
+	CompletedWeightDelta int64 // weight of items completed this interval
+	ItemsFailed          int64 // subset of completed
+	ItemsCanceled        int64
 
 	// Derived rates. Zero when Duration <= 0 or denominator is zero.
 	Throughput        float64       // completed items/sec (includes failed)
@@ -186,6 +187,7 @@ func Delta(prev, curr Stats, elapsed time.Duration) IntervalStats {
 	// Compute deltas, detect resets.
 	is.ItemsSubmitted = safeDelta(prev.Submitted, curr.Submitted, &is.ResetDetected)
 	is.ItemsCompleted = safeDelta(prev.Completed, curr.Completed, &is.ResetDetected)
+	is.CompletedWeightDelta = safeDelta(prev.CompletedWeight, curr.CompletedWeight, &is.ResetDetected)
 	is.ItemsFailed = safeDelta(prev.Failed, curr.Failed, &is.ResetDetected)
 	is.ItemsCanceled = safeDelta(prev.Canceled, curr.Canceled, &is.ResetDetected)
 
