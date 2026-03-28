@@ -843,3 +843,90 @@ func TestRopeWithControlStagePanics(t *testing.T) {
 			time.Second, toc.WithControlStage("chunk"))
 	})
 }
+
+func TestRopeProposalCleanupOnExit(t *testing.T) {
+	t.Run("count_mode", func(t *testing.T) {
+		tp := newRopeTestPipeline("A", "B", "C")
+		tp.stats["A"].itemsCompleted = 10
+		tp.stats["A"].serviceTimeDt = 100 * time.Millisecond
+		tp.stats["B"].itemsCompleted = 10
+		tp.stats["B"].serviceTimeDt = 200 * time.Millisecond
+		tp.stats["C"].goodput = 5.0
+
+		limits := toc.NewLimitManager(
+			func(n int) int { return n },
+			func(n int64) int64 { return n },
+			100, 0,
+		)
+
+		rc := toc.NewRopeController(tp.pipeline, "C", limits, tp.stageSnapshot, time.Second)
+		ctx, cancel := context.WithCancel(context.Background())
+		ticks := make(chan time.Time, 5)
+		done := make(chan struct{})
+		go func() {
+			rc.RunWithTicker(ctx, ticks)
+			close(done)
+		}()
+
+		// One tick — rope proposes a limit.
+		ticks <- time.Now()
+		time.Sleep(20 * time.Millisecond)
+
+		snap := limits.Effective()
+		if snap.CountSources < 2 { // baseline + rope
+			t.Fatalf("expected rope proposal active, got %d count sources", snap.CountSources)
+		}
+
+		// Cancel and wait for Run to exit.
+		cancel()
+		<-done
+
+		// Proposal should be withdrawn.
+		snap = limits.Effective()
+		if snap.CountSources > 1 { // only baseline should remain
+			t.Errorf("expected proposal withdrawn, got %d count sources: %v", snap.CountSources, snap.CountProposals)
+		}
+	})
+
+	t.Run("weight_mode", func(t *testing.T) {
+		tp := newRopeTestPipeline("A", "B", "C")
+		tp.stats["A"].itemsCompleted = 10
+		tp.stats["A"].serviceTimeDt = 100 * time.Millisecond
+		tp.stats["A"].admittedWeight = 5
+		tp.stats["B"].itemsCompleted = 10
+		tp.stats["B"].serviceTimeDt = 200 * time.Millisecond
+		tp.stats["B"].admittedWeight = 3
+		tp.stats["C"].goodput = 5.0
+
+		limits := toc.NewLimitManager(
+			func(n int) int { return n },
+			func(n int64) int64 { return n },
+			100, 1000, // weight baseline
+		)
+
+		rc := toc.NewWeightRopeController(tp.pipeline, "C", limits, tp.stageSnapshot, time.Second)
+		ctx, cancel := context.WithCancel(context.Background())
+		ticks := make(chan time.Time, 5)
+		done := make(chan struct{})
+		go func() {
+			rc.RunWithTicker(ctx, ticks)
+			close(done)
+		}()
+
+		ticks <- time.Now()
+		time.Sleep(20 * time.Millisecond)
+
+		snap := limits.Effective()
+		if snap.WeightSources < 2 {
+			t.Fatalf("expected weight proposal active, got %d weight sources", snap.WeightSources)
+		}
+
+		cancel()
+		<-done
+
+		snap = limits.Effective()
+		if snap.WeightSources > 1 {
+			t.Errorf("expected weight proposal withdrawn, got %d weight sources: %v", snap.WeightSources, snap.WeightProposals)
+		}
+	})
+}

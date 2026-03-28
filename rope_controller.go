@@ -312,6 +312,9 @@ func (rc *RopeController) RunWithTicker(ctx context.Context, ticks <-chan time.T
 }
 
 func (rc *RopeController) runLoop(ctx context.Context, ticks <-chan time.Time) {
+	handle := rc.limits.Register(rc.source)
+	defer handle.Close()
+
 	if ticks == nil {
 		ticker := time.NewTicker(rc.interval)
 		defer ticker.Stop()
@@ -321,14 +324,14 @@ func (rc *RopeController) runLoop(ctx context.Context, ticks <-chan time.Time) {
 	for {
 		select {
 		case <-ticks:
-			rc.adjust()
+			rc.adjust(handle)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func (rc *RopeController) adjust() {
+func (rc *RopeController) adjust(handle *LimitHandle) {
 	// 1. Read drum snapshot.
 	drumSnap := rc.stageSnapshot(rc.drum)
 	rawGoodput := drumSnap.Goodput
@@ -353,11 +356,11 @@ func (rc *RopeController) adjust() {
 			// Completions but no goodput (all failures) — seed error rate only.
 			rc.ewmaErrorRate = rawErrorRate
 			rc.drumErrorRateA.Store(int64(math.Float64bits(rawErrorRate)))
-			rc.applyRopeLength(rc.initialLength)
+			rc.applyRopeLength(handle,rc.initialLength)
 			return
 		} else {
 			// No signal at all — use initial rope length.
-			rc.applyRopeLength(rc.initialLength)
+			rc.applyRopeLength(handle,rc.initialLength)
 			return
 		}
 	} else {
@@ -382,7 +385,7 @@ func (rc *RopeController) adjust() {
 	// is < 1.0 because EWMA asymptotically approaches but never reaches
 	// raw=1.0.
 	if errorRate >= 0.95 {
-		rc.applyRopeLength(1)
+		rc.applyRopeLength(handle,1)
 		return
 	}
 
@@ -430,10 +433,10 @@ func (rc *RopeController) adjust() {
 	}
 
 	// 7. Apply.
-	rc.applyRopeLength(ropeLength)
+	rc.applyRopeLength(handle,ropeLength)
 }
 
-func (rc *RopeController) applyRopeLength(ropeLength int) {
+func (rc *RopeController) applyRopeLength(handle *LimitHandle, ropeLength int) {
 	rc.ropeLengthA.Store(int64(ropeLength))
 
 	// Compute aggregate WIP across segment stages (includes control stage).
@@ -470,9 +473,9 @@ func (rc *RopeController) applyRopeLength(ropeLength int) {
 	}
 
 	if rc.weightMode {
-		rc.limits.ProposeWeight(rc.source, ctrlLimit)
+		handle.ProposeWeight(ctrlLimit)
 	} else {
-		rc.limits.ProposeCount(rc.source, int(ctrlLimit))
+		handle.ProposeCount(int(ctrlLimit))
 	}
 	snap := rc.limits.Effective()
 	var applied int64
