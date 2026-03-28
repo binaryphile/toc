@@ -2,6 +2,7 @@ package toc
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"sync/atomic"
@@ -229,37 +230,44 @@ func newRopeController(
 	pipeline.mustStage(rc.controlStage)
 
 	// Derive and validate the controlled segment.
-	rc.segmentStages = deriveSegment(pipeline, rc.controlStage, drum)
-	validateSegment(pipeline, rc.controlStage, drum, rc.segmentStages)
+	segment, err := deriveSegment(pipeline, rc.controlStage, drum)
+	if err != nil {
+		panic("toc.NewRopeController: " + err.Error())
+	}
+	if err := validateSegment(pipeline, rc.controlStage, drum, segment); err != nil {
+		panic("toc.NewRopeController: " + err.Error())
+	}
+	rc.segmentStages = segment
 	rc.ewmaFlowTime = make(map[string]float64, len(rc.segmentStages))
 	rc.ropeLengthA.Store(int64(rc.initialLength))
 	return rc
 }
 
 // deriveSegment walks forward from start to drum, collecting the
-// ordered stage list (including start, excluding drum). Panics if
-// start doesn't reach drum or if any stage branches.
-func deriveSegment(p *Pipeline, start, drum string) []string {
+// ordered stage list (including start, excluding drum). Returns an
+// error if start doesn't reach drum, any stage branches, or start
+// equals drum.
+func deriveSegment(p *Pipeline, start, drum string) ([]string, error) {
 	var segment []string
 	visited := make(map[string]bool, 8)
 	current := start
 	for current != drum {
 		if visited[current] {
-			panic("toc.NewRopeController: cycle detected at stage: " + current)
+			return nil, fmt.Errorf("toc: cycle at stage %q", current)
 		}
 		visited[current] = true
 		segment = append(segment, current)
 
 		succs := p.forward[current]
 		if len(succs) != 1 {
-			panic("toc.NewRopeController: stage " + current + " has out-degree != 1 (non-linear)")
+			return nil, fmt.Errorf("toc: stage %q has out-degree %d, want 1", current, len(succs))
 		}
 		current = succs[0]
 	}
 	if len(segment) == 0 {
-		panic("toc.NewRopeController: controlStage must not equal drum")
+		return nil, fmt.Errorf("toc: control stage must not equal drum")
 	}
-	return segment
+	return segment, nil
 }
 
 // validateSegment checks invariants on the controlled segment.
@@ -269,13 +277,13 @@ func deriveSegment(p *Pipeline, start, drum string) []string {
 // must satisfy exclusivity: no side fan-in from outside the segment.
 // Every stage on the segment must have out-degree=1 (no fan-out).
 // The drum must have in-degree=1 (no mixed-source goodput).
-func validateSegment(p *Pipeline, start, drum string, segment []string) {
+func validateSegment(p *Pipeline, start, drum string, segment []string) error {
 	for i, name := range segment {
 		// In-degree check: internal nodes (not the control stage) must
 		// have exactly one predecessor. Items from outside the segment
 		// would corrupt per-stage sojourn and WIP metrics.
 		if i > 0 && len(p.reverse[name]) != 1 {
-			panic("toc.NewRopeController: stage " + name + " has in-degree != 1 (side fan-in)")
+			return fmt.Errorf("toc: stage %q has in-degree %d (side fan-in)", name, len(p.reverse[name]))
 		}
 	}
 
@@ -283,8 +291,9 @@ func validateSegment(p *Pipeline, start, drum string, segment []string) {
 	// External inputs to the drum would contribute goodput that the
 	// rope didn't release, breaking the sizing formula.
 	if len(p.reverse[drum]) != 1 {
-		panic("toc.NewRopeController: drum " + drum + " has in-degree != 1 (external inputs)")
+		return fmt.Errorf("toc: drum %q has in-degree %d (external inputs)", drum, len(p.reverse[drum]))
 	}
+	return nil
 }
 
 // Run blocks, adjusting rope length every interval until ctx is
