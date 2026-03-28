@@ -11,7 +11,7 @@ import (
 	"time"
 
 	hdrhistogram "github.com/HdrHistogram/hdrhistogram-go"
-	"github.com/binaryphile/fluentfp/call"
+	"github.com/binaryphile/fluentfp/wrap"
 	"github.com/binaryphile/fluentfp/rslt"
 )
 
@@ -457,7 +457,7 @@ func start[T, R any](
 				workerRecord(mw, d, &s.svcTimeUnderflow, &s.svcTimeOverflow)
 			}
 		}
-		decoratedFn := call.From(fn).With(
+		decoratedFn := wrap.Func(fn).Apply(
 			PanicRecovery[T, R](&s.panicked),
 			ServiceTiming[T, R](&s.serviceNs, onDur),
 		)
@@ -1240,7 +1240,7 @@ func (s *Stage[T, R]) SetWorkers(n int) (int, error) {
 					workerRecord(mw, d, &s.svcTimeUnderflow, &s.svcTimeOverflow)
 				}
 			}
-			decoratedFn := call.From(s.run.fn).With(
+			decoratedFn := wrap.Func(s.run.fn).Apply(
 				PanicRecovery[T, R](&s.panicked),
 				ServiceTiming[T, R](&s.serviceNs, onDur),
 			)
