@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"strings"
@@ -42,12 +43,32 @@ type Plated struct {
 
 // ── Constants ───────────────────────────────────────────────────────────
 
+// Real kitchen times, displayed in the preamble. Simulation runs at 360× speed.
+//
+// Real:  Prep 18s, Grill 3 min, Plate 18s. Orders arrive about one per minute (Poisson).
+// Sim:   50ms / 500ms / 50ms, mean inter-arrival 167ms.
+// Grill serves 2/s. Arrivals at 6/s. ρ = 3.0.
+// 50 orders arrive over ~8s. Queue builds visibly over ~15 ticks. Each scenario ~15s.
 const (
-	totalItems = 200
-	prepTime   = 2 * time.Millisecond  // fast
-	grillTime  = 20 * time.Millisecond // bottleneck — 10× slower
-	plateTime  = 2 * time.Millisecond  // fast
-	tickRate   = 200 * time.Millisecond
+	totalItems = 50
+	simSpeed   = "360x"
+
+	// Real durations (for display only).
+	realPrepTime  = "18 sec"
+	realGrillTime = "3 min"
+	realPlateTime = "18 sec"
+	realArrival   = "~1 min"
+
+	// Simulated durations (real ÷ 360).
+	prepTime  = 50 * time.Millisecond
+	grillTime = 500 * time.Millisecond
+	plateTime = 50 * time.Millisecond
+
+	tickRate = 500 * time.Millisecond
+
+	// Arrival rate: Poisson process, mean inter-arrival = 167ms simulated (1 min real).
+	// Grill service rate = 2/s. Arrival rate = 6/s. ρ = 3.0.
+	meanInterArrival = 167 * time.Millisecond
 )
 
 // ── ANSI ────────────────────────────────────────────────────────────────
@@ -310,14 +331,16 @@ func printKitchenIntro() {
 	fmt.Println("  A restaurant kitchen has three stations:")
 	fmt.Println()
 	fmt.Printf("    Orders -> Prep (%s) -> Grill (%s) -> Plate (%s) -> Served\n",
-		fmtDur(prepTime), fmtDur(grillTime), fmtDur(plateTime))
+		realPrepTime, realGrillTime, realPlateTime)
 	fmt.Println()
+	fmt.Printf("  Orders arrive randomly, about one every %s (Poisson).\n", realArrival)
 	fmt.Println("  The grill is 10x slower than everything else -- it's the")
 	fmt.Println("  bottleneck (the \"constraint\"). Station times and staffing are")
 	fmt.Println("  fixed across all scenarios. Only the WIP policy changes.")
 	fmt.Println()
-	fmt.Println("  You'll see three queue bars showing tickets waiting at each")
-	fmt.Println("  station. Watch the queue in front of the Grill.")
+	fmt.Printf("  Simulation runs at %s speed. You'll see three queue bars\n", simSpeed)
+	fmt.Println("  showing tickets waiting at each station. Watch the queue")
+	fmt.Println("  in front of the Grill.")
 	fmt.Println()
 	fmt.Println("================================================================")
 	fmt.Println()
@@ -335,7 +358,7 @@ var preambles = []scenarioPreamble{
 		whatHappens: `Kitchen accepts orders as fast as they come. Prep finishes fast
     and dumps tickets on the grill counter. The grill can't keep up.`,
 		lookFor: []string{
-			`"Queued for Grill" grows to fill its entire 200-slot buffer.`,
+			`"Queued for Grill" grows steadily as orders arrive faster than the grill works.`,
 			"Throughput is the same as later scenarios -- the flood doesn't help.",
 		},
 	},
@@ -345,8 +368,7 @@ var preambles = []scenarioPreamble{
     it's not the problem. Tickets still pile up between prep and grill.`,
 		lookFor: []string{
 			"Prep queue stays small.",
-			"Grill queue still explodes (100-slot buffer fills).",
-			"Limiting the wrong station doesn't fix the bottleneck.",
+			"Grill queue still fills up. Limiting the wrong station doesn't help.",
 		},
 	},
 	{
@@ -451,8 +473,8 @@ func main() {
 			desc:           "No WIP cap -- orders flood in freely",
 			constraintInfo: "Constraint: Grill    WIP limit: none",
 			opts: stageOpts{
-				prep:  toc.Options[Order]{Capacity: 200, Workers: 4},
-				grill: toc.Options[Prepped]{Capacity: 200, Workers: 1},
+				prep:  toc.Options[Order]{Capacity: 50, Workers: 4},
+				grill: toc.Options[Prepped]{Capacity: 50, Workers: 1},
 				plate: defaultPlate,
 			},
 		},
@@ -462,7 +484,7 @@ func main() {
 			constraintInfo: "Constraint: Grill    WIP limit: Prep (MaxWIP=8)",
 			opts: stageOpts{
 				prep:  toc.Options[Order]{Capacity: 10, Workers: 4, MaxWIP: 8},
-				grill: toc.Options[Prepped]{Capacity: 100, Workers: 1},
+				grill: toc.Options[Prepped]{Capacity: 30, Workers: 1},
 				plate: defaultPlate,
 			},
 		},
@@ -523,6 +545,7 @@ func runScenarioVisual(sc scenario, term terminal) scenarioResult {
 
 	go func() {
 		for i := range totalItems {
+			time.Sleep(poissonDelay(meanInterArrival))
 			o := Order{Name: fmt.Sprintf("order-%d", i)}
 			if err := prep.Submit(ctx, o); err != nil {
 				break
@@ -622,6 +645,7 @@ func runScenarioStatic(sc scenario) scenarioResult {
 
 	go func() {
 		for i := range totalItems {
+			time.Sleep(poissonDelay(meanInterArrival))
 			o := Order{Name: fmt.Sprintf("order-%d", i)}
 			if err := prep.Submit(ctx, o); err != nil {
 				break
@@ -828,6 +852,15 @@ func queueSparkline(timeline []snapshot, maxQ int64) string {
 		b.WriteString(colorReset)
 	}
 	return b.String()
+}
+
+// ── Arrival distribution ────────────────────────────────────────────────
+
+// poissonDelay returns an exponentially distributed delay with the given mean.
+// This models Poisson process inter-arrival times.
+func poissonDelay(mean time.Duration) time.Duration {
+	// Exponential distribution: -mean * ln(U), U ~ Uniform(0,1)
+	return time.Duration(float64(mean) * (-math.Log(1.0 - rand.Float64())))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
