@@ -15,26 +15,29 @@ const (
 	maxYieldInflation        = 10.0
 )
 
-// RopeController is a periodic controller that bounds aggregate upstream
-// WIP between the pipeline head and the drum (constraint) by adjusting
-// the head stage's MaxWIP.
+// RopeController is a periodic controller that bounds aggregate WIP
+// in a controlled segment of the pipeline by adjusting the control
+// stage's MaxWIP (or MaxWIPWeight for weight-aware mode).
 //
-// It computes rope length from drum goodput, upstream flow time, and a
+// The controlled segment runs from a control stage to the drum
+// (constraint). By default, the control stage is the pipeline's
+// topological head; use [WithControlStage] to start at a different
+// stage (e.g., for unit-consistent rope when the head produces
+// variable-sized outputs).
+//
+// It computes rope length from drum goodput, segment flow time, and a
 // safety factor using a Little's Law heuristic. This is an approximate
 // soft control — SetMaxWIP cannot revoke existing permits and has a
 // floor of 1. After a target decrease, already-admitted items persist
 // until completion.
 //
-// Phase 3 scope: single head, linear chain (no branches between head
-// and drum), count-based (not weight-aware).
-//
 // Create with [NewRopeController], configure with [RopeOption]
 // functions, then call [RopeController.Run].
 type RopeController struct {
-	pipeline  *Pipeline
-	drum      string
-	head      string
-	ancestors []string // AncestorsOf(drum), cached — includes head
+	pipeline      *Pipeline
+	drum          string
+	controlStage  string   // start of the rope-controlled segment
+	segmentStages []string // ordered stages from controlStage to drum (exclusive of drum)
 
 	limits     *LimitManager
 	source     string // proposal source name
@@ -59,7 +62,7 @@ type RopeController struct {
 	ropeLengthA      atomic.Int64
 	ropeWIPA         atomic.Int64
 	adjustmentCountA atomic.Int64
-	headAppliedWIPA  atomic.Int64
+	controlStageAppliedWIPA atomic.Int64
 	drumGoodputA     atomic.Int64 // float64 bits
 	drumErrorRateA   atomic.Int64 // float64 bits
 }
@@ -104,18 +107,40 @@ func WithInitialRopeLength(n int) RopeOption {
 	}
 }
 
+// WithControlStage overrides the inferred segment start. By default
+// the rope starts at the pipeline's topological head (zero in-degree
+// stage feeding the drum). When set, the rope measures and limits only
+// the segment from this stage to the drum. The named stage must exist
+// in the pipeline and must reach the drum via a unique linear path.
+//
+// Stages upstream of the control stage are not measured by the rope
+// but may still experience backpressure through channel blocking.
+func WithControlStage(name string) RopeOption {
+	return func(rc *RopeController) {
+		rc.controlStage = name
+	}
+}
+
 // NewRopeController creates a count-based rope controller.
 //
-// The pipeline must be frozen and contain exactly one head feeding the
-// drum via a linear chain (no branches or joins between head and drum).
+// By default the controller infers the control stage from the
+// pipeline's topological head (zero in-degree stage feeding the drum).
+// Use [WithControlStage] to start the controlled segment at a
+// non-head stage — for example, to get unit-consistent rope when
+// the pipeline head produces variable-sized outputs.
 //
-// limits is the [LimitManager] for the head stage. The controller
+// The controlled segment (from control stage to drum) must be a
+// linear chain: no fan-out from any segment stage, no side fan-in
+// to internal nodes, and the drum must have exactly one predecessor.
+// The control stage may have upstream predecessors outside the segment.
+//
+// limits is the [LimitManager] for the control stage. The controller
 // proposes count limits via limits.ProposeCount("processing-rope", n).
 // stageSnapshot returns the latest [IntervalStats] for a named stage.
 //
-// Panics if pipeline is not frozen, drum is unknown, topology is not a
-// single linear chain from head to drum, limits or stageSnapshot is nil,
-// or interval <= 0.
+// Panics if pipeline is not frozen, drum is unknown, the controlled
+// segment is not linear, limits or stageSnapshot is nil, or
+// interval <= 0.
 func NewRopeController(
 	pipeline *Pipeline,
 	drum string,
@@ -129,13 +154,14 @@ func NewRopeController(
 
 // NewWeightRopeController creates a weight-aware rope controller.
 // Same as [NewRopeController] but limits aggregate WEIGHT between
-// release and drum instead of item count. Items with variable
+// control stage and drum instead of item count. Items with variable
 // processing cost are properly accounted.
 //
-// limits is the [LimitManager] for the head stage. The controller
+// limits is the [LimitManager] for the control stage. The controller
 // proposes weight limits via limits.ProposeWeight("processing-weight-rope", n).
 //
-// Same linear chain and single-head requirements as [NewRopeController].
+// Same segment topology requirements as [NewRopeController].
+// Supports [WithControlStage].
 func NewWeightRopeController(
 	pipeline *Pipeline,
 	drum string,
@@ -173,19 +199,10 @@ func newRopeController(
 		panic("toc.NewRopeController: interval must be positive")
 	}
 
-	heads := pipeline.HeadsTo(drum)
-	if len(heads) != 1 {
-		panic("toc.NewRopeController: exactly one head must feed the drum")
-	}
-	head := heads[0]
-	ancestors := pipeline.AncestorsOf(drum)
-	validateLinearChain(pipeline, head, drum, ancestors)
-
+	// Build with non-overridable fields + option defaults.
 	rc := &RopeController{
 		pipeline:      pipeline,
 		drum:          drum,
-		head:          head,
-		ancestors:     ancestors,
 		limits:        limits,
 		source:        source,
 		weightMode:    weightMode,
@@ -194,65 +211,77 @@ func newRopeController(
 		safetyFactor:  defaultSafetyFactor,
 		initialLength: defaultInitialRopeLength,
 		logger:        log.Default(),
-		ewmaFlowTime:  make(map[string]float64, len(ancestors)),
 	}
 
+	// Apply options (may set controlStage, safetyFactor, etc.).
 	for _, opt := range opts {
 		opt(rc)
 	}
 
+	// Derive control stage if not set by WithControlStage.
+	if rc.controlStage == "" {
+		heads := pipeline.HeadsTo(drum)
+		if len(heads) != 1 {
+			panic("toc.NewRopeController: exactly one head must feed the drum (or use WithControlStage)")
+		}
+		rc.controlStage = heads[0]
+	}
+	pipeline.mustStage(rc.controlStage)
+
+	// Derive and validate the controlled segment.
+	rc.segmentStages = deriveSegment(pipeline, rc.controlStage, drum)
+	validateSegment(pipeline, rc.controlStage, drum, rc.segmentStages)
+	rc.ewmaFlowTime = make(map[string]float64, len(rc.segmentStages))
 	rc.ropeLengthA.Store(int64(rc.initialLength))
 	return rc
 }
 
-// validateLinearChain verifies the path from head to drum is a simple
-// chain. Every node on the path must have out-degree=1 in the full
-// graph (no fan-out). Internal nodes must have in-degree=1 (no fan-in).
-// Panics if any node violates these constraints.
-func validateLinearChain(p *Pipeline, head, drum string, ancestors []string) {
-	// Build the set of nodes on the controlled path.
-	onPath := make(map[string]bool, len(ancestors)+1)
-	for _, a := range ancestors {
-		onPath[a] = true
-	}
-	onPath[drum] = true
-
-	// Walk from head along forward edges.
-	// Every node on the path (including head) must have out-degree=1 in
-	// the FULL graph — not just on-path. Items from a fan-out head would
-	// split, making Admitted counts unreliable for aggregate WIP.
-	// Internal nodes must also have in-degree=1 in the full graph.
-	visited := make(map[string]bool, len(ancestors)+2)
-	current := head
+// deriveSegment walks forward from start to drum, collecting the
+// ordered stage list (including start, excluding drum). Panics if
+// start doesn't reach drum or if any stage branches.
+func deriveSegment(p *Pipeline, start, drum string) []string {
+	var segment []string
+	visited := make(map[string]bool, 8)
+	current := start
 	for current != drum {
 		if visited[current] {
 			panic("toc.NewRopeController: cycle detected at stage: " + current)
 		}
 		visited[current] = true
+		segment = append(segment, current)
 
-		// Out-degree check: exactly one successor in the full graph.
-		if len(p.forward[current]) != 1 {
+		succs := p.forward[current]
+		if len(succs) != 1 {
 			panic("toc.NewRopeController: stage " + current + " has out-degree != 1 (non-linear)")
 		}
+		current = succs[0]
+	}
+	if len(segment) == 0 {
+		panic("toc.NewRopeController: controlStage must not equal drum")
+	}
+	return segment
+}
 
-		next := p.forward[current][0]
-		if !onPath[next] {
-			panic("toc.NewRopeController: stage " + current + " successor not on path to drum")
+// validateSegment checks invariants on the controlled segment.
+//
+// The control stage may have upstream predecessors outside the segment
+// (its in-degree is unchecked). All other segment stages and the drum
+// must satisfy exclusivity: no side fan-in from outside the segment.
+// Every stage on the segment must have out-degree=1 (no fan-out).
+// The drum must have in-degree=1 (no mixed-source goodput).
+func validateSegment(p *Pipeline, start, drum string, segment []string) {
+	for i, name := range segment {
+		// In-degree check: internal nodes (not the control stage) must
+		// have exactly one predecessor. Items from outside the segment
+		// would corrupt per-stage sojourn and WIP metrics.
+		if i > 0 && len(p.reverse[name]) != 1 {
+			panic("toc.NewRopeController: stage " + name + " has in-degree != 1 (side fan-in)")
 		}
-
-		// In-degree check for internal nodes: exactly one predecessor.
-		if next != drum && next != head {
-			if len(p.reverse[next]) != 1 {
-				panic("toc.NewRopeController: stage " + next + " has in-degree != 1 (non-linear)")
-			}
-		}
-
-		current = next
 	}
 
 	// Drum in-degree check: must have exactly one predecessor.
-	// External inputs to the drum would contribute goodput that the rope
-	// didn't release, breaking the sizing formula.
+	// External inputs to the drum would contribute goodput that the
+	// rope didn't release, breaking the sizing formula.
 	if len(p.reverse[drum]) != 1 {
 		panic("toc.NewRopeController: drum " + drum + " has in-degree != 1 (external inputs)")
 	}
@@ -363,7 +392,7 @@ func (rc *RopeController) adjust() {
 
 	// 5. Compute upstream flow time (EWMA-smoothed per ancestor).
 	var totalFlowTime float64
-	for _, name := range rc.ancestors {
+	for _, name := range rc.segmentStages {
 		snap := rc.stageSnapshot(name)
 
 		var rawFlow float64
@@ -398,12 +427,12 @@ func (rc *RopeController) adjust() {
 func (rc *RopeController) applyRopeLength(ropeLength int) {
 	rc.ropeLengthA.Store(int64(ropeLength))
 
-	// Compute aggregate WIP across all ancestors (includes head).
+	// Compute aggregate WIP across segment stages (includes control stage).
 	// Stage occupancies are sampled independently, not from a consistent
 	// snapshot. The aggregate is approximate.
 	var aggregateWIP int64
-	var headWIP int64
-	for _, name := range rc.ancestors {
+	var ctrlWIP int64
+	for _, name := range rc.segmentStages {
 		stats := rc.pipeline.StageStats(name)()
 		var wip int64
 		if rc.weightMode {
@@ -415,26 +444,26 @@ func (rc *RopeController) applyRopeLength(ropeLength int) {
 			wip = 0
 		}
 		aggregateWIP += wip
-		if name == rc.head {
-			headWIP = wip
+		if name == rc.controlStage {
+			ctrlWIP = wip
 		}
 	}
 
 	rc.ropeWIPA.Store(aggregateWIP)
 
-	downstreamWIP := aggregateWIP - headWIP
+	downstreamWIP := aggregateWIP - ctrlWIP
 	if downstreamWIP < 0 {
 		downstreamWIP = 0
 	}
-	headLimit := int64(ropeLength) - downstreamWIP
-	if headLimit < 1 {
-		headLimit = 1 // floor: 0 disables limiting in both SetMaxWIP and SetMaxWIPWeight
+	ctrlLimit := int64(ropeLength) - downstreamWIP
+	if ctrlLimit < 1 {
+		ctrlLimit = 1 // floor: 0 disables limiting in both SetMaxWIP and SetMaxWIPWeight
 	}
 
 	if rc.weightMode {
-		rc.limits.ProposeWeight(rc.source, headLimit)
+		rc.limits.ProposeWeight(rc.source, ctrlLimit)
 	} else {
-		rc.limits.ProposeCount(rc.source, int(headLimit))
+		rc.limits.ProposeCount(rc.source, int(ctrlLimit))
 	}
 	snap := rc.limits.Effective()
 	var applied int64
@@ -443,7 +472,7 @@ func (rc *RopeController) applyRopeLength(ropeLength int) {
 	} else {
 		applied = int64(snap.AppliedCount)
 	}
-	rc.headAppliedWIPA.Store(applied)
+	rc.controlStageAppliedWIPA.Store(applied)
 	rc.adjustmentCountA.Add(1)
 
 	// Log only on change.
@@ -453,8 +482,8 @@ func (rc *RopeController) applyRopeLength(ropeLength int) {
 	}
 	curr := ropeLogState{length: ropeLength, wip: aggregateWIP, applied: int(applied)}
 	if curr != rc.lastLog {
-		rc.logger.Printf("[%s] length=%d wip=%d head=%d→%d goodput=%.1f err=%.2f",
-			mode, ropeLength, aggregateWIP, headLimit, applied,
+		rc.logger.Printf("[%s] length=%d wip=%d ctrl=%d→%d goodput=%.1f err=%.2f",
+			mode, ropeLength, aggregateWIP, ctrlLimit, applied,
 			math.Float64frombits(uint64(rc.drumGoodputA.Load())),
 			math.Float64frombits(uint64(rc.drumErrorRateA.Load())))
 		rc.lastLog = curr
@@ -469,7 +498,7 @@ type RopeStats struct {
 	DrumGoodput     float64 // EWMA-smoothed drum goodput (items/sec)
 	DrumErrorRate   float64 // EWMA-smoothed drum error rate
 	AdjustmentCount int64   // how many times rope was adjusted
-	HeadAppliedWIP  int     // last value returned by setHeadWIP
+	HeadAppliedWIP int // effective WIP limit applied at the control stage (name kept for API compat)
 }
 
 func (rc *RopeController) checkAndSetStarted() {
@@ -497,6 +526,6 @@ func (rc *RopeController) Stats() RopeStats {
 		DrumGoodput:     math.Float64frombits(uint64(rc.drumGoodputA.Load())),
 		DrumErrorRate:   math.Float64frombits(uint64(rc.drumErrorRateA.Load())),
 		AdjustmentCount: rc.adjustmentCountA.Load(),
-		HeadAppliedWIP:  int(rc.headAppliedWIPA.Load()),
+		HeadAppliedWIP:  int(rc.controlStageAppliedWIPA.Load()),
 	}
 }

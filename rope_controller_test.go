@@ -659,3 +659,187 @@ func TestWeightRopeLowDownstreamWeight(t *testing.T) {
 		t.Errorf("HeadAppliedWIP = %d, want %d (full rope, no downstream)", stats.HeadAppliedWIP, stats.RopeLength)
 	}
 }
+
+// ── WithControlStage tests ──────────────────────────────────────────────
+
+func TestRopeWithControlStage(t *testing.T) {
+	// 4-stage pipeline: git → chunk → embed → store
+	// ControlStage = chunk, drum = store.
+	// Rope should measure only chunk and embed, not git.
+	tp := newRopeTestPipeline("git", "chunk", "embed", "store")
+
+	tp.stats["git"].itemsCompleted = 10
+	tp.stats["git"].serviceTimeDt = 100 * time.Millisecond
+	tp.stats["chunk"].itemsCompleted = 10
+	tp.stats["chunk"].serviceTimeDt = 200 * time.Millisecond
+	tp.stats["embed"].itemsCompleted = 10
+	tp.stats["embed"].serviceTimeDt = 300 * time.Millisecond
+	tp.stats["store"].goodput = 5.0
+
+	// git WIP should NOT be counted.
+	tp.stats["git"].admitted = 99
+	tp.stats["chunk"].admitted = 3
+	tp.stats["embed"].admitted = 2
+
+	rc, ticks, cancel, done := newTestRope(tp, "store", toc.WithControlStage("chunk"))
+	defer cancel()
+
+	ticks <- time.Now()
+	time.Sleep(20 * time.Millisecond)
+
+	stats := rc.Stats()
+
+	// RopeWIP should be chunk(3) + embed(2) = 5, NOT include git(99).
+	if stats.RopeWIP != 5 {
+		t.Errorf("RopeWIP = %d, want 5 (chunk+embed only, not git)", stats.RopeWIP)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestRopeWithControlStageDefaultUnchanged(t *testing.T) {
+	// 3-stage pipeline, no WithControlStage — should behave identically.
+	tp := newRopeTestPipeline("A", "B", "C")
+	tp.stats["A"].itemsCompleted = 10
+	tp.stats["A"].serviceTimeDt = 100 * time.Millisecond
+	tp.stats["B"].itemsCompleted = 10
+	tp.stats["B"].serviceTimeDt = 200 * time.Millisecond
+	tp.stats["C"].goodput = 5.0
+	tp.stats["A"].admitted = 3
+	tp.stats["B"].admitted = 2
+
+	rc, ticks, cancel, done := newTestRope(tp, "C")
+	defer cancel()
+
+	ticks <- time.Now()
+	time.Sleep(20 * time.Millisecond)
+
+	stats := rc.Stats()
+	if stats.RopeWIP != 5 {
+		t.Errorf("RopeWIP = %d, want 5", stats.RopeWIP)
+	}
+
+	cancel()
+	<-done
+}
+
+func TestRopeWithControlStagePanics(t *testing.T) {
+	t.Run("not_ancestor_of_drum", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic for controlStage not reaching drum")
+			}
+		}()
+
+		p := toc.NewPipeline()
+		p.AddStage("A", dummyStats())
+		p.AddStage("B", dummyStats())
+		p.AddStage("C", dummyStats())
+		p.AddEdge("A", "B")
+		// C is disconnected — cannot reach B.
+		p.Freeze()
+
+		toc.NewRopeController(p, "B",
+			testLimits(),
+			func(string) toc.IntervalStats { return toc.IntervalStats{} },
+			time.Second, toc.WithControlStage("C"))
+	})
+
+	t.Run("equals_drum", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic for controlStage == drum")
+			}
+		}()
+
+		tp := newRopeTestPipeline("A", "B", "C")
+		toc.NewRopeController(tp.pipeline, "C",
+			testLimits(),
+			func(string) toc.IntervalStats { return toc.IntervalStats{} },
+			time.Second, toc.WithControlStage("C"))
+	})
+
+	t.Run("fan_out_from_control_stage", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic for fan-out from control stage")
+			}
+		}()
+
+		p := toc.NewPipeline()
+		p.AddStage("A", dummyStats())
+		p.AddStage("B", dummyStats())
+		p.AddStage("C", dummyStats())
+		p.AddStage("D", dummyStats())
+		p.AddEdge("A", "B")
+		p.AddEdge("B", "C")
+		p.AddEdge("B", "D") // fan-out from B
+		p.Freeze()
+
+		toc.NewRopeController(p, "C",
+			testLimits(),
+			func(string) toc.IntervalStats { return toc.IntervalStats{} },
+			time.Second, toc.WithControlStage("B"))
+	})
+
+	t.Run("drum_fan_in", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic for drum with fan-in")
+			}
+		}()
+
+		p := toc.NewPipeline()
+		p.AddStage("A", dummyStats())
+		p.AddStage("B", dummyStats())
+		p.AddStage("C", dummyStats())
+		p.AddStage("D", dummyStats())
+		p.AddEdge("A", "B")
+		p.AddEdge("B", "D")
+		p.AddEdge("C", "D") // external input to drum
+		p.Freeze()
+
+		toc.NewRopeController(p, "D",
+			testLimits(),
+			func(string) toc.IntervalStats { return toc.IntervalStats{} },
+			time.Second, toc.WithControlStage("B"))
+	})
+
+	t.Run("side_input_to_internal_node", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic for side input to internal segment node")
+			}
+		}()
+
+		p := toc.NewPipeline()
+		p.AddStage("A", dummyStats())
+		p.AddStage("B", dummyStats())
+		p.AddStage("C", dummyStats())
+		p.AddStage("D", dummyStats())
+		p.AddStage("X", dummyStats())
+		p.AddEdge("A", "B")
+		p.AddEdge("B", "C")
+		p.AddEdge("C", "D")
+		p.AddEdge("X", "C") // side input to C
+		p.Freeze()
+
+		toc.NewRopeController(p, "D",
+			testLimits(),
+			func(string) toc.IntervalStats { return toc.IntervalStats{} },
+			time.Second, toc.WithControlStage("B"))
+	})
+
+	t.Run("upstream_of_control_stage_allowed", func(t *testing.T) {
+		// git → chunk → embed → store
+		// WithControlStage("chunk") — git is upstream, should NOT panic.
+		tp := newRopeTestPipeline("git", "chunk", "embed", "store")
+
+		// This should succeed without panic.
+		toc.NewRopeController(tp.pipeline, "store",
+			testLimits(),
+			tp.stageSnapshot,
+			time.Second, toc.WithControlStage("chunk"))
+	})
+}
