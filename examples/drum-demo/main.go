@@ -1,9 +1,10 @@
-// Package main demonstrates why identifying the correct drum (constraint)
-// matters in a pipeline, using a visual pipeline diagram.
+// Package main demonstrates why identifying the correct constraint matters
+// in a pipeline, using a restaurant kitchen metaphor.
 //
-// Four scenarios process the same work through parse → transform → store,
-// where transform is 10× slower. The demo shows typed items (File → Chunk →
-// Embedding) flowing through stages with visible buffers.
+// Four scenarios process 200 orders through Prep → Grill → Plate,
+// where the Grill is 10× slower. The demo shows queue depths at each
+// station and how WIP control at the constraint eliminates queue buildup
+// without affecting throughput.
 //
 // Run:
 //
@@ -11,6 +12,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"math"
@@ -27,59 +29,39 @@ import (
 
 // ── Domain types ────────────────────────────────────────────────────────
 
-// File represents a raw input item.
-type File struct {
-	Name string
-	Size int
-}
+// Order represents a customer order entering the kitchen.
+type Order struct{ Name string }
 
-// Chunk represents a parsed intermediate item.
-type Chunk struct {
-	Source string
-	Index  int
-}
+// Prepped represents an order after prep station.
+type Prepped struct{ Source string }
 
-// Embedding represents a transformed output item.
-type Embedding struct {
+// Plated represents a finished dish ready to serve.
+type Plated struct {
 	Source string
-	Vec    [4]float64
 }
 
 // ── Constants ───────────────────────────────────────────────────────────
 
 const (
 	totalItems = 200
-	parseTime  = 2 * time.Millisecond  // fast
-	xformTime  = 20 * time.Millisecond // bottleneck — 10× slower
-	storeTime  = 2 * time.Millisecond  // fast
+	prepTime   = 2 * time.Millisecond  // fast
+	grillTime  = 20 * time.Millisecond // bottleneck — 10× slower
+	plateTime  = 2 * time.Millisecond  // fast
 	tickRate   = 200 * time.Millisecond
-
-	// Simulated per-item memory cost.
-	itemWeightKB = 64
 )
 
-// ── ANSI / symbols ──────────────────────────────────────────────────────
+// ── ANSI ────────────────────────────────────────────────────────────────
 
 var (
 	colorRed    = "\033[31m"
 	colorYellow = "\033[33m"
 	colorGreen  = "\033[32m"
-	colorBlue   = "\033[34m"
 	colorBold   = "\033[1m"
 	colorDim    = "\033[2m"
 	colorReset  = "\033[0m"
 )
 
 const (
-	symFile      = "○"
-	symChunk     = "●"
-	symEmbedding = "◆"
-	symEmpty     = "·"
-	symDone      = "✓"
-
-	arrowIdle   = "───▶"
-	arrowActive = "═══▶"
-
 	boxTL = "╭"
 	boxTR = "╮"
 	boxBL = "╰"
@@ -112,7 +94,6 @@ func disableColors() {
 	colorRed = ""
 	colorYellow = ""
 	colorGreen = ""
-	colorBlue = ""
 	colorBold = ""
 	colorDim = ""
 	colorReset = ""
@@ -148,304 +129,285 @@ func (t terminal) home() {
 	}
 }
 
-func (t terminal) clearScreen() {
-	if t.isTTY {
-		fmt.Print("\033[2J\033[H")
-	}
-}
-
 // ── Snapshot model ──────────────────────────────────────────────────────
 
-type stageSnap struct {
-	name        string
-	symbol      string
-	color       string
-	buffered    int64
-	capacity    int
-	inFlight    int64
-	transferred int64 // delta since last tick
-	workers     int
-	serviceTime time.Duration
+type queueSnap struct {
+	label        string
+	depth        int64
+	capacity     int  // real QueueCapacity
+	isConstraint bool
+}
+
+type stationStatus struct {
+	name     string
+	inFlight int64
 }
 
 type snapshot struct {
-	elapsed     time.Duration
-	stages      [3]stageSnap
-	pipelineWIP int64
-	memoryKB    int64
-	done        int64
-	total       int
-}
-
-type prevStats struct {
-	parseCompleted int64
-	xformCompleted int64
-	storeCompleted int64
+	queues   [3]queueSnap
+	stations [3]stationStatus
+	done     int64
+	total    int
 }
 
 func collectSnapshot(
-	elapsed time.Duration,
-	parse interface{ Stats() toc.Stats },
-	xform interface{ Stats() toc.Stats },
-	store interface{ Stats() toc.Stats },
-	submitted, completed int64,
-	prev prevStats,
-	parseOpts, xformOpts, storeOpts int, // capacities
-	parseWorkers, xformWorkers, storeWorkers int,
-) (snapshot, prevStats) {
-	ps := parse.Stats()
-	xs := xform.Stats()
-	ss := store.Stats()
+	prep interface{ Stats() toc.Stats },
+	grill interface{ Stats() toc.Stats },
+	plate interface{ Stats() toc.Stats },
+	completed int64,
+) snapshot {
+	ps := prep.Stats()
+	gs := grill.Stats()
+	ss := plate.Stats()
 
-	pipelineWIP := submitted - completed
-	if pipelineWIP < 0 {
-		pipelineWIP = 0
+	prepInFlight := ps.Submitted - ps.Completed - ps.BufferedDepth
+	if prepInFlight < 0 {
+		prepInFlight = 0
 	}
-
-	// Start stage: Submitted - Completed - BufferedDepth
-	parseInFlight := ps.Submitted - ps.Completed - ps.BufferedDepth
-	if parseInFlight < 0 {
-		parseInFlight = 0
+	grillInFlight := gs.Received - gs.Completed - gs.BufferedDepth
+	if grillInFlight < 0 {
+		grillInFlight = 0
 	}
-	// Pipe stage: Received - Completed - BufferedDepth
-	xformInFlight := xs.Received - xs.Completed - xs.BufferedDepth
-	if xformInFlight < 0 {
-		xformInFlight = 0
-	}
-	storeInFlight := ss.Received - ss.Completed - ss.BufferedDepth
-	if storeInFlight < 0 {
-		storeInFlight = 0
+	plateInFlight := ss.Received - ss.Completed - ss.BufferedDepth
+	if plateInFlight < 0 {
+		plateInFlight = 0
 	}
 
-	snap := snapshot{
-		elapsed:     elapsed,
-		pipelineWIP: pipelineWIP,
-		memoryKB:    pipelineWIP * itemWeightKB,
-		done:        completed,
-		total:       totalItems,
-		stages: [3]stageSnap{
-			{
-				name: "parse", symbol: symFile, color: colorGreen,
-				buffered: ps.BufferedDepth, capacity: parseOpts,
-				inFlight: parseInFlight, transferred: ps.Completed - prev.parseCompleted,
-				workers: parseWorkers, serviceTime: parseTime,
-			},
-			{
-				name: "xform", symbol: symChunk, color: colorYellow,
-				buffered: xs.BufferedDepth, capacity: xformOpts,
-				inFlight: xformInFlight, transferred: xs.Completed - prev.xformCompleted,
-				workers: xformWorkers, serviceTime: xformTime,
-			},
-			{
-				name: "store", symbol: symEmbedding, color: colorBlue,
-				buffered: ss.BufferedDepth, capacity: storeOpts,
-				inFlight: storeInFlight, transferred: ss.Completed - prev.storeCompleted,
-				workers: storeWorkers, serviceTime: storeTime,
-			},
+	return snapshot{
+		queues: [3]queueSnap{
+			{label: "Queued for Prep", depth: ps.BufferedDepth, capacity: ps.QueueCapacity},
+			{label: "Queued for Grill", depth: gs.BufferedDepth, capacity: gs.QueueCapacity, isConstraint: true},
+			{label: "Queued for Plate", depth: ss.BufferedDepth, capacity: ss.QueueCapacity},
 		},
+		stations: [3]stationStatus{
+			{name: "Prep", inFlight: prepInFlight},
+			{name: "Grill", inFlight: grillInFlight},
+			{name: "Plate", inFlight: plateInFlight},
+		},
+		done:  completed,
+		total: totalItems,
 	}
-
-	newPrev := prevStats{
-		parseCompleted: ps.Completed,
-		xformCompleted: xs.Completed,
-		storeCompleted: ss.Completed,
-	}
-
-	return snap, newPrev
 }
 
-// ── Frame renderer (pure) ───────────────────────────────────────────────
+// ── Frame renderer ──────────────────────────────────────────────────────
 
-const frameWidth = 64
+const frameWidth = 66
 
-func renderFrame(scenarioName, scenarioDesc string, snap snapshot) string {
+func renderFrame(scenarioLabel, constraintInfo string, snap snapshot, throughput float64) string {
 	var b strings.Builder
 
-	// Top border
+	// Top border.
 	b.WriteString(boxTL + strings.Repeat(boxH, frameWidth) + boxTR + "\n")
 
-	// Header
-	header := fmt.Sprintf(" %s%-30s%s  WIP: %-3d  Done: %d/%d",
-		colorBold, scenarioName, colorReset,
-		snap.pipelineWIP, snap.done, snap.total)
+	// Header: scenario name + done.
+	header := fmt.Sprintf(" %s%-36s%s  Done: %d/%d",
+		colorBold, scenarioLabel, colorReset,
+		snap.done, snap.total)
 	b.WriteString(boxV + padRight(header, frameWidth) + boxV + "\n")
 
-	desc := fmt.Sprintf(" %s%s%s", colorDim, scenarioDesc, colorReset)
-	b.WriteString(boxV + padRight(desc, frameWidth) + boxV + "\n")
+	// Constraint/WIP info line.
+	info := fmt.Sprintf(" %s%s%s", colorDim, constraintInfo, colorReset)
+	b.WriteString(boxV + padRight(info, frameWidth) + boxV + "\n")
 
-	// Separator
+	// Separator.
 	b.WriteString(boxML + strings.Repeat(boxH, frameWidth) + boxMR + "\n")
 
-	// Blank line
+	// Blank line.
 	b.WriteString(boxV + strings.Repeat(" ", frameWidth) + boxV + "\n")
 
-	// Stage names with arrows
-	stageLine := " "
-	for i, st := range snap.stages {
-		arrow := arrowIdle
-		if st.transferred > 0 {
-			arrow = colorBold + arrowActive + colorReset
-		}
-		if i > 0 {
-			stageLine += "  " + arrow + "  "
-		}
-		stageLine += st.color + st.symbol + colorReset + " " + st.name
-	}
-	// Final arrow to done
-	lastArrow := arrowIdle
-	if snap.stages[2].transferred > 0 {
-		lastArrow = colorBold + arrowActive + colorReset
-	}
-	stageLine += "  " + lastArrow + "  " + symDone
-	b.WriteString(boxV + padRight(stageLine, frameWidth) + boxV + "\n")
+	// Queue bars.
+	for i, q := range snap.queues {
+		barLine := fmt.Sprintf(" %-19s %s", q.label, renderQueueBar(q))
+		b.WriteString(boxV + padRight(barLine, frameWidth) + boxV + "\n")
 
-	// Buffer line
-	bufLine := " "
-	for i, st := range snap.stages {
-		if i > 0 {
-			bufLine += "        " // arrow spacing
+		if q.isConstraint {
+			// Constraint annotation line.
+			annotation := fmt.Sprintf(" %s%s<- constraint%s",
+				strings.Repeat(" ", 20), colorDim, colorReset)
+			b.WriteString(boxV + padRight(annotation, frameWidth) + boxV + "\n")
+		} else if i < 2 {
+			// Spacer between non-constraint queues.
+			b.WriteString(boxV + strings.Repeat(" ", frameWidth) + boxV + "\n")
 		}
-		bufLine += "buf:" + renderBuffer(st)
 	}
-	b.WriteString(boxV + padRight(bufLine, frameWidth) + boxV + "\n")
 
-	// In-flight line
-	inLine := " "
-	for i, st := range snap.stages {
-		if i > 0 {
-			inLine += "        "
-		}
-		inLine += fmt.Sprintf("in:%-2d %s", st.inFlight, fmtDur(st.serviceTime))
-	}
-	b.WriteString(boxV + padRight(inLine, frameWidth) + boxV + "\n")
-
-	// Blank line
+	// Blank line.
 	b.WriteString(boxV + strings.Repeat(" ", frameWidth) + boxV + "\n")
 
-	// Stats bars
-	memMB := snap.memoryKB / 1024
-	tputPerSec := float64(snap.stages[2].transferred) / tickRate.Seconds()
-	statsLine := fmt.Sprintf(" throughput %s %3.0f/s   memory %s %dMB",
-		bar(tputPerSec, 60, 12), tputPerSec,
-		memBar(memMB, 12), memMB)
-	b.WriteString(boxV + padRight(statsLine, frameWidth) + boxV + "\n")
+	// Station status line.
+	statusLine := " "
+	for i, st := range snap.stations {
+		if i > 0 {
+			statusLine += "   "
+		}
+		status := colorDim + "[idle]" + colorReset
+		if st.inFlight > 0 {
+			status = colorGreen + "[working]" + colorReset
+		}
+		statusLine += st.name + " " + status
+	}
+	b.WriteString(boxV + padRight(statusLine, frameWidth) + boxV + "\n")
 
-	// Legend
-	legend := fmt.Sprintf(" %s%s%s File  %s%s%s Chunk  %s%s%s Embedding",
-		colorGreen, symFile, colorReset,
-		colorYellow, symChunk, colorReset,
-		colorBlue, symEmbedding, colorReset)
-	b.WriteString(boxV + padRight(legend, frameWidth) + boxV + "\n")
+	// Throughput line.
+	tputLine := fmt.Sprintf(" Throughput: ~%.0f/s", throughput)
+	b.WriteString(boxV + padRight(tputLine, frameWidth) + boxV + "\n")
 
-	// Bottom border
+	// Bottom border.
 	b.WriteString(boxBL + strings.Repeat(boxH, frameWidth) + boxBR + "\n")
 
 	return b.String()
 }
 
-func renderBuffer(st stageSnap) string {
-	if st.capacity <= 16 {
-		// Dot display
-		filled := int(st.buffered)
-		if filled < 0 {
-			filled = 0
-		}
-		if filled > st.capacity {
-			filled = st.capacity
-		}
-		empty := st.capacity - filled
-		return st.color + strings.Repeat(st.symbol, filled) + colorReset +
-			strings.Repeat(symEmpty, empty)
-	}
-	// Bar display for large capacity
-	return barWithCount(st.buffered, int64(st.capacity), 8, st.color)
-}
+func renderQueueBar(q queueSnap) string {
+	const barWidth = 30
 
-func barWithCount(current, max int64, width int, color string) string {
-	if max <= 0 {
-		max = 1
+	filled := int(q.depth)
+	if filled < 0 {
+		filled = 0
 	}
-	pct := float64(current) / float64(max)
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 1 {
-		pct = 1
-	}
-	filled := int(math.Round(pct * float64(width)))
-	if filled > width {
-		filled = width
-	}
-	empty := width - filled
-	return color + strings.Repeat("█", filled) + colorReset +
-		strings.Repeat("░", empty) +
-		fmt.Sprintf(" %d", current)
-}
 
-func bar(value, max float64, width int) string {
-	if max <= 0 {
-		max = 1
+	cap := q.capacity
+	if cap <= 0 {
+		cap = 1
 	}
-	pct := value / max
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 1 {
-		pct = 1
-	}
-	filled := int(math.Round(pct * float64(width)))
-	if filled > width {
-		filled = width
-	}
-	empty := width - filled
 
+	// Scale to bar width.
+	filledChars := int(math.Round(float64(filled) / float64(cap) * float64(barWidth)))
+	if filledChars > barWidth {
+		filledChars = barWidth
+	}
+	emptyChars := barWidth - filledChars
+
+	// Color based on fullness.
+	pct := float64(filled) / float64(cap)
 	color := colorGreen
-	if pct >= 0.5 {
-		color = colorYellow
+	if q.isConstraint {
+		if pct > 0.5 {
+			color = colorRed
+		}
+	} else {
+		switch {
+		case pct > 0.75:
+			color = colorRed
+		case pct > 0.5:
+			color = colorYellow
+		}
 	}
-	return color + strings.Repeat("█", filled) + strings.Repeat("░", empty) + colorReset
+
+	return color + strings.Repeat("▓", filledChars) + colorReset +
+		strings.Repeat("░", emptyChars) +
+		fmt.Sprintf("  %d/%d", filled, cap)
 }
 
-func memBar(memMB int64, width int) string {
-	maxMB := int64(totalItems * itemWeightKB / 1024)
-	if maxMB <= 0 {
-		maxMB = 1
-	}
-	pct := float64(memMB) / float64(maxMB)
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 1 {
-		pct = 1
-	}
-	filled := int(math.Round(pct * float64(width)))
-	if filled > width {
-		filled = width
-	}
-	empty := width - filled
+// ── Preamble system ─────────────────────────────────────────────────────
 
-	color := colorGreen
-	switch {
-	case pct >= 0.5:
-		color = colorRed
-	case pct >= 0.15:
-		color = colorYellow
+func printKitchenIntro() {
+	fmt.Println()
+	fmt.Println("================================================================")
+	fmt.Println()
+	fmt.Println("  THE KITCHEN")
+	fmt.Println()
+	fmt.Println("  A restaurant kitchen has three stations:")
+	fmt.Println()
+	fmt.Printf("    Orders -> Prep (%s) -> Grill (%s) -> Plate (%s) -> Served\n",
+		fmtDur(prepTime), fmtDur(grillTime), fmtDur(plateTime))
+	fmt.Println()
+	fmt.Println("  The grill is 10x slower than everything else -- it's the")
+	fmt.Println("  bottleneck (the \"constraint\"). Station times and staffing are")
+	fmt.Println("  fixed across all scenarios. Only the WIP policy changes.")
+	fmt.Println()
+	fmt.Println("  You'll see three queue bars showing tickets waiting at each")
+	fmt.Println("  station. Watch the queue in front of the Grill.")
+	fmt.Println()
+	fmt.Println("================================================================")
+	fmt.Println()
+}
+
+type scenarioPreamble struct {
+	wipLimit    string
+	whatHappens string
+	lookFor     []string
+}
+
+var preambles = []scenarioPreamble{
+	{
+		wipLimit: "none",
+		whatHappens: `Kitchen accepts orders as fast as they come. Prep finishes fast
+    and dumps tickets on the grill counter. The grill can't keep up.`,
+		lookFor: []string{
+			`"Queued for Grill" grows to fill its entire 200-slot buffer.`,
+			"Throughput is the same as later scenarios -- the flood doesn't help.",
+		},
+	},
+	{
+		wipLimit: "Prep (MaxWIP=8)",
+		whatHappens: `We cap how many orders prep can work on. But prep is fast --
+    it's not the problem. Tickets still pile up between prep and grill.`,
+		lookFor: []string{
+			"Prep queue stays small.",
+			"Grill queue still explodes (100-slot buffer fills).",
+			"Limiting the wrong station doesn't fix the bottleneck.",
+		},
+	},
+	{
+		wipLimit: "Grill (MaxWIP=3)",
+		whatHappens: `We cap WIP at the grill. Only 3 items can be admitted at once
+    (buffered + being grilled). Backpressure propagates upstream --
+    prep slows because it can't hand off.`,
+		lookFor: []string{
+			"Grill queue stays at 2-3. Same throughput.",
+			"The flood is gone.",
+		},
+	},
+	{
+		wipLimit: "Grill (MaxWIP=3), plus Capacity=1 at Prep and Plate",
+		whatHappens: `Same grill WIP cap, plus minimal buffer space at the other
+    stations. Tightest possible flow.`,
+		lookFor: []string{
+			"All queues near zero. Same throughput.",
+			"If throughput drops, this experiment is confounded.",
+		},
+	},
+}
+
+func printScenarioPreamble(sc scenario, idx int, isTTY bool) {
+	p := preambles[idx]
+	fmt.Printf("  %s%s%s\n", colorBold, sc.name, colorReset)
+	fmt.Printf("  %s%s%s\n", colorDim, sc.desc, colorReset)
+	fmt.Println()
+	fmt.Printf("  Constraint:  Grill\n")
+	fmt.Printf("  WIP limit:   %s\n", p.wipLimit)
+	fmt.Println()
+	fmt.Printf("  What happens:\n")
+	fmt.Printf("    %s\n", p.whatHappens)
+	fmt.Println()
+	fmt.Printf("  What to look for:\n")
+	for _, item := range p.lookFor {
+		fmt.Printf("    - %s\n", item)
 	}
-	return color + strings.Repeat("█", filled) + strings.Repeat("░", empty) + colorReset
+	fmt.Println()
+
+	if isTTY {
+		fmt.Print("  [press enter to start]")
+		reader := bufio.NewReader(os.Stdin)
+		reader.ReadBytes('\n')
+	}
+	fmt.Println()
 }
 
 // ── Scenario config ─────────────────────────────────────────────────────
 
 type stageOpts struct {
-	parse toc.Options[File]
-	xform toc.Options[Chunk]
-	store toc.Options[Embedding]
+	prep  toc.Options[Order]
+	grill toc.Options[Prepped]
+	plate toc.Options[Plated]
 }
 
 type scenario struct {
-	name string
-	desc string
-	opts stageOpts
+	name           string
+	desc           string
+	constraintInfo string // "Constraint: Grill    WIP limit: ..."
+	opts           stageOpts
 }
 
 type scenarioResult struct {
@@ -453,10 +415,9 @@ type scenarioResult struct {
 	timeline   []snapshot
 	elapsed    time.Duration
 	throughput float64
-	peakWIP    int64
-	peakMemKB  int64
-	peakXformQ int64
-	wipSeconds float64
+	peakGrillQ int64
+	avgGrillQ  float64
+	ticketSec  float64 // integral of grill queue depth over time
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -482,62 +443,65 @@ func main() {
 		os.Exit(1)
 	}()
 
-	defaultStore := toc.Options[Embedding]{Capacity: 10, Workers: 2}
+	defaultPlate := toc.Options[Plated]{Capacity: 10, Workers: 2}
 
 	scenarios := []scenario{
 		{
-			name: "No drum",
-			desc: "No WIP limits. Parse floods freely.",
+			name:           "Uncontrolled",
+			desc:           "No WIP cap -- orders flood in freely",
+			constraintInfo: "Constraint: Grill    WIP limit: none",
 			opts: stageOpts{
-				parse: toc.Options[File]{Capacity: 200, Workers: 4},
-				xform: toc.Options[Chunk]{Capacity: 200, Workers: 1},
-				store: defaultStore,
+				prep:  toc.Options[Order]{Capacity: 200, Workers: 4},
+				grill: toc.Options[Prepped]{Capacity: 200, Workers: 1},
+				plate: defaultPlate,
 			},
 		},
 		{
-			name: "Limit on wrong stage",
-			desc: "MaxWIP=8 on parse. Helps some, but transform still floods.",
+			name:           "Limit on Prep (wrong place)",
+			desc:           "MaxWIP=8 on prep -- fast station, not the bottleneck",
+			constraintInfo: "Constraint: Grill    WIP limit: Prep (MaxWIP=8)",
 			opts: stageOpts{
-				parse: toc.Options[File]{Capacity: 10, Workers: 4, MaxWIP: 8},
-				xform: toc.Options[Chunk]{Capacity: 100, Workers: 1},
-				store: defaultStore,
+				prep:  toc.Options[Order]{Capacity: 10, Workers: 4, MaxWIP: 8},
+				grill: toc.Options[Prepped]{Capacity: 100, Workers: 1},
+				plate: defaultPlate,
 			},
 		},
 		{
-			name: "Correct drum (transform)",
-			desc: "MaxWIP=3 on transform. Only what the drum can eat.",
+			name:           "Limit on Grill (the constraint)",
+			desc:           "MaxWIP=3 on grill -- paces release to the bottleneck",
+			constraintInfo: "Constraint: Grill    WIP limit: Grill (MaxWIP=3)",
 			opts: stageOpts{
-				parse: toc.Options[File]{Capacity: 10, Workers: 4},
-				xform: toc.Options[Chunk]{Capacity: 4, Workers: 1, MaxWIP: 3},
-				store: defaultStore,
+				prep:  toc.Options[Order]{Capacity: 10, Workers: 4},
+				grill: toc.Options[Prepped]{Capacity: 4, Workers: 1, MaxWIP: 3},
+				plate: defaultPlate,
 			},
 		},
 		{
-			name: "Drum + minimal buffers",
-			desc: "MaxWIP=3 on transform, Capacity:1 everywhere else.",
+			name:           "Constraint + Tight Buffers",
+			desc:           "MaxWIP=3 on grill, Capacity=1 everywhere else",
+			constraintInfo: "Constraint: Grill    WIP limit: Grill (MaxWIP=3) + Cap=1",
 			opts: stageOpts{
-				parse: toc.Options[File]{Capacity: 1, Workers: 4},
-				xform: toc.Options[Chunk]{Capacity: 2, Workers: 1, MaxWIP: 3},
-				store: toc.Options[Embedding]{Capacity: 1, Workers: 2},
+				prep:  toc.Options[Order]{Capacity: 1, Workers: 4},
+				grill: toc.Options[Prepped]{Capacity: 2, Workers: 1, MaxWIP: 3},
+				plate: toc.Options[Plated]{Capacity: 1, Workers: 2},
 			},
 		},
 	}
 
 	results := make([]scenarioResult, len(scenarios))
 
+	printKitchenIntro()
+
 	for i, sc := range scenarios {
+		printScenarioPreamble(sc, i, term.isTTY)
+
 		if term.isTTY {
 			term.enterAltScreen()
 			term.hideCursor()
 			results[i] = runScenarioVisual(sc, term)
-			// Show summary for 2 seconds.
 			time.Sleep(2 * time.Second)
 			term.exitAltScreen()
 			term.showCursor()
-			// Print one-line result to main screen.
-			fmt.Printf("  %s%-30s%s  t/s: %5.0f  peak WIP: %3d  mem: %dMB\n",
-				colorBold, sc.name, colorReset,
-				results[i].throughput, results[i].peakWIP, results[i].peakMemKB/1024)
 		} else {
 			results[i] = runScenarioStatic(sc)
 		}
@@ -553,20 +517,18 @@ func runScenarioVisual(sc scenario, term terminal) scenarioResult {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	parse := toc.Start[File, Chunk](ctx, makeParseFn(), sc.opts.parse)
-	xform := toc.Pipe[Chunk, Embedding](ctx, parse.Out(), makeXformFn(), sc.opts.xform)
-	store := toc.Pipe[Embedding, Embedding](ctx, xform.Out(), makeStoreFn(), sc.opts.store)
+	prep := toc.Start[Order, Prepped](ctx, makePrepFn(), sc.opts.prep)
+	grill := toc.Pipe[Prepped, Plated](ctx, prep.Out(), makeGrillFn(), sc.opts.grill)
+	plate := toc.Pipe[Plated, Plated](ctx, grill.Out(), makePlateFn(), sc.opts.plate)
 
-	var submitted atomic.Int64
 	go func() {
 		for i := range totalItems {
-			f := File{Name: fmt.Sprintf("file-%d.txt", i), Size: 1024 + i}
-			if err := parse.Submit(ctx, f); err != nil {
+			o := Order{Name: fmt.Sprintf("order-%d", i)}
+			if err := prep.Submit(ctx, o); err != nil {
 				break
 			}
-			submitted.Add(1)
 		}
-		parse.CloseInput()
+		prep.CloseInput()
 	}()
 
 	var completed atomic.Int64
@@ -574,7 +536,7 @@ func runScenarioVisual(sc scenario, term terminal) scenarioResult {
 	drainWg.Add(1)
 	go func() {
 		defer drainWg.Done()
-		for range store.Out() {
+		for range plate.Out() {
 			completed.Add(1)
 		}
 	}()
@@ -583,37 +545,44 @@ func runScenarioVisual(sc scenario, term terminal) scenarioResult {
 	defer ticker.Stop()
 
 	start := time.Now()
-	var prev prevStats
 	var timeline []snapshot
-	var peakWIP, peakXformQ int64
-	var wipSeconds float64
-	prevWIP := int64(0)
+	var peakGrillQ int64
+	var grillQSum float64
+	var prevGrillQ int64
+	var ticketSec float64
+	var ticks int64
+	ewmaTput := 0.0
+	prevDone := int64(0)
+
+	scenarioLabel := sc.name
 
 	for {
 		<-ticker.C
 
-		elapsed := time.Since(start)
-		snap, newPrev := collectSnapshot(
-			elapsed, parse, xform, store,
-			submitted.Load(), completed.Load(), prev,
-			sc.opts.parse.Capacity, sc.opts.xform.Capacity, sc.opts.store.Capacity,
-			workerCount(sc.opts.parse.Workers), workerCount(sc.opts.xform.Workers), workerCount(sc.opts.store.Workers),
-		)
-		prev = newPrev
+		snap := collectSnapshot(prep, grill, plate, completed.Load())
 		timeline = append(timeline, snap)
+		ticks++
 
-		wipSeconds += float64(prevWIP+snap.pipelineWIP) / 2.0 * tickRate.Seconds()
-		prevWIP = snap.pipelineWIP
-
-		if snap.pipelineWIP > peakWIP {
-			peakWIP = snap.pipelineWIP
+		grillQ := snap.queues[1].depth
+		if grillQ > peakGrillQ {
+			peakGrillQ = grillQ
 		}
-		if snap.stages[1].buffered > peakXformQ {
-			peakXformQ = snap.stages[1].buffered
+		grillQSum += float64(grillQ)
+		ticketSec += float64(prevGrillQ+grillQ) / 2.0 * tickRate.Seconds()
+		prevGrillQ = grillQ
+
+		// EWMA throughput.
+		doneDelta := snap.done - prevDone
+		prevDone = snap.done
+		instantTput := float64(doneDelta) / tickRate.Seconds()
+		if ewmaTput == 0 {
+			ewmaTput = instantTput
+		} else {
+			ewmaTput = 0.3*instantTput + 0.7*ewmaTput
 		}
 
 		term.home()
-		fmt.Print(renderFrame(sc.name, sc.desc, snap))
+		fmt.Print(renderFrame(scenarioLabel, sc.constraintInfo, snap, ewmaTput))
 
 		if snap.done >= int64(totalItems) {
 			break
@@ -621,19 +590,23 @@ func runScenarioVisual(sc scenario, term terminal) scenarioResult {
 	}
 
 	drainWg.Wait()
-	store.Wait()
+	plate.Wait()
 	elapsed := time.Since(start)
 	throughput := float64(totalItems) / elapsed.Seconds()
+
+	avgGrillQ := 0.0
+	if ticks > 0 {
+		avgGrillQ = grillQSum / float64(ticks)
+	}
 
 	return scenarioResult{
 		name:       sc.name,
 		timeline:   timeline,
 		elapsed:    elapsed,
 		throughput: throughput,
-		peakWIP:    peakWIP,
-		peakMemKB:  peakWIP * itemWeightKB,
-		peakXformQ: peakXformQ,
-		wipSeconds: wipSeconds,
+		peakGrillQ: peakGrillQ,
+		avgGrillQ:  avgGrillQ,
+		ticketSec:  ticketSec,
 	}
 }
 
@@ -643,20 +616,18 @@ func runScenarioStatic(sc scenario) scenarioResult {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	parse := toc.Start[File, Chunk](ctx, makeParseFn(), sc.opts.parse)
-	xform := toc.Pipe[Chunk, Embedding](ctx, parse.Out(), makeXformFn(), sc.opts.xform)
-	store := toc.Pipe[Embedding, Embedding](ctx, xform.Out(), makeStoreFn(), sc.opts.store)
+	prep := toc.Start[Order, Prepped](ctx, makePrepFn(), sc.opts.prep)
+	grill := toc.Pipe[Prepped, Plated](ctx, prep.Out(), makeGrillFn(), sc.opts.grill)
+	plate := toc.Pipe[Plated, Plated](ctx, grill.Out(), makePlateFn(), sc.opts.plate)
 
-	var submitted atomic.Int64
 	go func() {
 		for i := range totalItems {
-			f := File{Name: fmt.Sprintf("file-%d.txt", i), Size: 1024 + i}
-			if err := parse.Submit(ctx, f); err != nil {
+			o := Order{Name: fmt.Sprintf("order-%d", i)}
+			if err := prep.Submit(ctx, o); err != nil {
 				break
 			}
-			submitted.Add(1)
 		}
-		parse.CloseInput()
+		prep.CloseInput()
 	}()
 
 	var completed atomic.Int64
@@ -664,48 +635,52 @@ func runScenarioStatic(sc scenario) scenarioResult {
 	drainWg.Add(1)
 	go func() {
 		defer drainWg.Done()
-		for range store.Out() {
+		for range plate.Out() {
 			completed.Add(1)
 		}
 	}()
-
-	fmt.Printf("\n--- %s ---\n", sc.name)
-	fmt.Printf("    %s\n", sc.desc)
 
 	ticker := time.NewTicker(tickRate)
 	defer ticker.Stop()
 
 	start := time.Now()
-	var prev prevStats
 	var timeline []snapshot
-	var peakWIP, peakXformQ int64
-	var wipSeconds float64
-	prevWIP := int64(0)
+	var peakGrillQ int64
+	var grillQSum float64
+	var prevGrillQ int64
+	var ticketSec float64
+	var ticks int64
 
 	for {
 		<-ticker.C
 		elapsed := time.Since(start)
-		snap, newPrev := collectSnapshot(
-			elapsed, parse, xform, store,
-			submitted.Load(), completed.Load(), prev,
-			sc.opts.parse.Capacity, sc.opts.xform.Capacity, sc.opts.store.Capacity,
-			workerCount(sc.opts.parse.Workers), workerCount(sc.opts.xform.Workers), workerCount(sc.opts.store.Workers),
-		)
-		prev = newPrev
+		snap := collectSnapshot(prep, grill, plate, completed.Load())
 		timeline = append(timeline, snap)
+		ticks++
 
-		wipSeconds += float64(prevWIP+snap.pipelineWIP) / 2.0 * tickRate.Seconds()
-		prevWIP = snap.pipelineWIP
-		if snap.pipelineWIP > peakWIP {
-			peakWIP = snap.pipelineWIP
+		grillQ := snap.queues[1].depth
+		if grillQ > peakGrillQ {
+			peakGrillQ = grillQ
 		}
-		if snap.stages[1].buffered > peakXformQ {
-			peakXformQ = snap.stages[1].buffered
+		grillQSum += float64(grillQ)
+		ticketSec += float64(prevGrillQ+grillQ) / 2.0 * tickRate.Seconds()
+		prevGrillQ = grillQ
+
+		// Station status abbreviations.
+		stationStr := ""
+		for j, st := range snap.stations {
+			if j > 0 {
+				stationStr += " "
+			}
+			tag := "idle"
+			if st.inFlight > 0 {
+				tag = "work"
+			}
+			stationStr += fmt.Sprintf("%s:[%s]", strings.ToLower(st.name), tag)
 		}
 
-		fmt.Printf("    %s  fed:%3d done:%3d WIP:%3d xformQ:%3d\n",
-			fmtDur(elapsed), submitted.Load(), completed.Load(),
-			snap.pipelineWIP, snap.stages[1].buffered)
+		fmt.Printf("    %s  done:%3d grill-q:%3d  %s\n",
+			fmtDur(elapsed), snap.done, grillQ, stationStr)
 
 		if snap.done >= int64(totalItems) {
 			break
@@ -713,153 +688,114 @@ func runScenarioStatic(sc scenario) scenarioResult {
 	}
 
 	drainWg.Wait()
-	store.Wait()
+	plate.Wait()
 	elapsed := time.Since(start)
 	throughput := float64(totalItems) / elapsed.Seconds()
 
-	fmt.Printf("    Throughput: %.0f/s  Peak WIP: %d  Memory: %dMB\n",
-		throughput, peakWIP, peakWIP*itemWeightKB/1024)
+	avgGrillQ := 0.0
+	if ticks > 0 {
+		avgGrillQ = grillQSum / float64(ticks)
+	}
+
+	fmt.Printf("    Throughput: %.0f/s  Peak grill q: %d  Avg grill q: %.0f\n",
+		throughput, peakGrillQ, avgGrillQ)
 
 	return scenarioResult{
 		name:       sc.name,
 		timeline:   timeline,
 		elapsed:    elapsed,
 		throughput: throughput,
-		peakWIP:    peakWIP,
-		peakMemKB:  peakWIP * itemWeightKB,
-		peakXformQ: peakXformQ,
-		wipSeconds: wipSeconds,
+		peakGrillQ: peakGrillQ,
+		avgGrillQ:  avgGrillQ,
+		ticketSec:  ticketSec,
 	}
 }
 
 // ── Stage functions ─────────────────────────────────────────────────────
 
-func makeParseFn() func(context.Context, File) (Chunk, error) {
-	return func(_ context.Context, f File) (Chunk, error) {
-		time.Sleep(parseTime)
-		return Chunk{Source: f.Name, Index: 0}, nil
+func makePrepFn() func(context.Context, Order) (Prepped, error) {
+	return func(_ context.Context, o Order) (Prepped, error) {
+		time.Sleep(prepTime)
+		return Prepped{Source: o.Name}, nil
 	}
 }
 
-func makeXformFn() func(context.Context, Chunk) (Embedding, error) {
-	return func(_ context.Context, c Chunk) (Embedding, error) {
-		time.Sleep(xformTime)
-		return Embedding{Source: c.Source, Vec: [4]float64{0.1, 0.2, 0.3, 0.4}}, nil
+func makeGrillFn() func(context.Context, Prepped) (Plated, error) {
+	return func(_ context.Context, p Prepped) (Plated, error) {
+		time.Sleep(grillTime)
+		return Plated{Source: p.Source}, nil
 	}
 }
 
-func makeStoreFn() func(context.Context, Embedding) (Embedding, error) {
-	return func(_ context.Context, e Embedding) (Embedding, error) {
-		time.Sleep(storeTime)
-		return e, nil
+func makePlateFn() func(context.Context, Plated) (Plated, error) {
+	return func(_ context.Context, p Plated) (Plated, error) {
+		time.Sleep(plateTime)
+		return p, nil
 	}
-}
-
-func workerCount(w int) int {
-	if w <= 0 {
-		return 1
-	}
-	return w
 }
 
 // ── Comparison ──────────────────────────────────────────────────────────
 
 func printComparison(results []scenarioResult) {
-	fmt.Println(divider("RESOURCE COMPARISON"))
+	fmt.Println(divider("THE KITCHEN — RESULTS"))
 	fmt.Println()
 
-	fmt.Printf("  %-30s │ %5s │ %8s │ %8s │ %8s │ %12s\n",
-		"Scenario", "t/s", "peak WIP", "peak mem", "xform q", "WIP·sec")
-	fmt.Println("  " + strings.Repeat("─", 84))
+	fmt.Printf("  %-36s %s %s %s %s %s\n",
+		"Scenario", "│", " t/s", "│ peak grill q", "│ avg grill q", "│ ticket-sec │  time")
+	fmt.Println("  " + strings.Repeat("─", 96))
 
 	for _, r := range results {
-		memStr := fmt.Sprintf("%dMB", r.peakMemKB/1024)
-		wipSec := fmt.Sprintf("%.0f", r.wipSeconds)
-
-		wipColor := colorGreen
+		grillColor := colorGreen
 		switch {
-		case r.peakWIP > 100:
-			wipColor = colorRed
-		case r.peakWIP > 30:
-			wipColor = colorYellow
+		case r.peakGrillQ > 100:
+			grillColor = colorRed
+		case r.peakGrillQ > 30:
+			grillColor = colorYellow
 		}
 
-		fmt.Printf("  %-30s │ %5.0f │ %s%8d%s │ %8s │ %8d │ %12s\n",
+		fmt.Printf("  %-36s │ %4.0f │ %s%12d%s │ %10.0f │ %10.0f │ %s\n",
 			r.name, r.throughput,
-			wipColor, r.peakWIP, colorReset,
-			memStr, r.peakXformQ, wipSec)
+			grillColor, r.peakGrillQ, colorReset,
+			r.avgGrillQ,
+			r.ticketSec,
+			fmtDur(r.elapsed))
 	}
 
-	fmt.Println()
-	fmt.Println("  " + colorBold + "Pipeline WIP over time:" + colorReset)
-	fmt.Println()
+	// Grill queue sparkline — use global max across all scenarios for honest comparison.
+	globalMaxQ := int64(0)
 	for _, r := range results {
-		spark := wipSparkline(r.timeline, int64(totalItems))
-		fmt.Printf("  %-18s %s\n", r.name+":", spark)
-	}
-
-	fmt.Println()
-	fmt.Println("  " + colorBold + "Drum (xform) queue over time:" + colorReset)
-	fmt.Println()
-	for _, r := range results {
-		maxQ := int64(0)
 		for _, s := range r.timeline {
-			if s.stages[1].buffered > maxQ {
-				maxQ = s.stages[1].buffered
+			if s.queues[1].depth > globalMaxQ {
+				globalMaxQ = s.queues[1].depth
 			}
 		}
-		if maxQ == 0 {
-			maxQ = 1
-		}
-		spark := queueSparkline(r.timeline, maxQ)
-		fmt.Printf("  %-18s %s\n", r.name+":", spark)
+	}
+	if globalMaxQ == 0 {
+		globalMaxQ = 1
 	}
 
 	fmt.Println()
-	fmt.Println(colorBold + "  The rope must reference the drum." + colorReset)
-	fmt.Println("  Scenarios 1-2: limiting the wrong stage or nothing — items flood the constraint.")
-	fmt.Println("  Scenario 3: rope at the constraint — steady flow, minimal WIP.")
-	fmt.Println("  Scenario 4: rope + minimal non-drum buffers — even lower WIP cost")
-	fmt.Println("  under this workload. Same throughput, less resource waste.")
+	fmt.Println("  " + colorBold + "Grill queue over time:" + colorReset)
+	fmt.Println()
+	for _, r := range results {
+		spark := queueSparkline(r.timeline, globalMaxQ)
+		fmt.Printf("  %-36s %s\n", r.name+":", spark)
+	}
 
-	if len(results) >= 4 && results[3].peakMemKB > 0 {
-		memRatio := float64(results[0].peakMemKB) / float64(results[3].peakMemKB)
-		costRatio := results[0].wipSeconds / results[3].wipSeconds
-		fmt.Printf("\n  Scenario 1 vs 4: %.0f× peak memory, %.0f× total resource cost — same work done.\n",
-			memRatio, costRatio)
-	}
-}
+	// Closing narrative.
+	fmt.Println()
+	fmt.Println("  " + colorBold + "The grill sets the pace for the whole kitchen." + colorReset)
+	fmt.Println("  Scenarios 1-2: no limit or wrong limit -- tickets pile up at the grill.")
+	fmt.Println("  Scenario 3: WIP limit at the grill -- same speed, tiny queues.")
+	fmt.Println("  Scenario 4: tight buffers everywhere -- leanest operation, same speed.")
+	fmt.Println()
+	fmt.Println("  Throughput is unchanged because the grill was always the bottleneck.")
+	fmt.Println("  WIP control didn't slow the kitchen down -- it stopped wasting counter space.")
 
-func wipSparkline(timeline []snapshot, maxPossible int64) string {
-	if maxPossible <= 0 {
-		maxPossible = 1
+	if len(results) >= 4 && results[3].ticketSec > 0 {
+		ratio := results[0].ticketSec / results[3].ticketSec
+		fmt.Printf("\n  Scenario 1 vs 4: %.0fx total ticket-seconds at the grill -- same work done.\n", ratio)
 	}
-	bars := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-	var b strings.Builder
-	for _, s := range timeline {
-		pct := float64(s.pipelineWIP) / float64(maxPossible)
-		if pct < 0 {
-			pct = 0
-		}
-		if pct > 1 {
-			pct = 1
-		}
-		idx := int(pct * float64(len(bars)-1))
-		if idx >= len(bars) {
-			idx = len(bars) - 1
-		}
-		color := colorGreen
-		switch {
-		case pct >= 0.5:
-			color = colorRed
-		case pct >= 0.15:
-			color = colorYellow
-		}
-		b.WriteString(color)
-		b.WriteRune(bars[idx])
-		b.WriteString(colorReset)
-	}
-	return b.String()
 }
 
 func queueSparkline(timeline []snapshot, maxQ int64) string {
@@ -869,7 +805,7 @@ func queueSparkline(timeline []snapshot, maxQ int64) string {
 	bars := []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 	var b strings.Builder
 	for _, s := range timeline {
-		pct := float64(s.stages[1].buffered) / float64(maxQ)
+		pct := float64(s.queues[1].depth) / float64(maxQ)
 		if pct < 0 {
 			pct = 0
 		}
@@ -897,7 +833,6 @@ func queueSparkline(timeline []snapshot, maxQ int64) string {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 func padRight(s string, width int) string {
-	// Strip ANSI for length calculation.
 	visible := stripANSI(s)
 	pad := width - len([]rune(visible))
 	if pad <= 0 {
@@ -942,3 +877,4 @@ func fmtDur(d time.Duration) string {
 	}
 	return fmt.Sprintf("%.1fs", d.Seconds())
 }
+
