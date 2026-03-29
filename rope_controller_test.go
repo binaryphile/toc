@@ -218,6 +218,81 @@ func TestRopeHoldOnZeroGoodputAfterWarmup(t *testing.T) {
 	}
 }
 
+func TestRopeDrainedToZeroWIP(t *testing.T) {
+	tp := newRopeTestPipeline("head", "drum")
+
+	// First tick: valid signal, establishes EWMA.
+	tp.stats["drum"].goodput = 50
+	tp.stats["drum"].itemsCompleted = 100
+	tp.stats["head"].serviceTimeDt = 500 * time.Millisecond
+	tp.stats["head"].itemsCompleted = 100
+	tp.stats["head"].admitted = 5
+
+	rc, ticks, cancel, done := newTestRope(tp, "drum")
+	defer func() { cancel(); <-done }()
+
+	ticks <- time.Now()
+	time.Sleep(5 * time.Millisecond)
+	lengthAfterWarmup := rc.Stats().RopeLength
+
+	// Second tick: everything drained — Admitted=0 across all stages.
+	tp.stats["drum"].goodput = 0
+	tp.stats["drum"].itemsCompleted = 0
+	tp.stats["head"].serviceTimeDt = 0
+	tp.stats["head"].itemsCompleted = 0
+	tp.stats["head"].admitted = 0
+
+	ticks <- time.Now()
+	time.Sleep(5 * time.Millisecond)
+
+	stats := rc.Stats()
+	// Should hold previous length, not produce inf/NaN/panic.
+	if stats.RopeLength != lengthAfterWarmup {
+		t.Errorf("RopeLength = %d, want %d (held after drain)", stats.RopeLength, lengthAfterWarmup)
+	}
+	if stats.RopeLength < 1 {
+		t.Errorf("RopeLength = %d, must be >= 1", stats.RopeLength)
+	}
+}
+
+func TestRopeMultipleConsecutiveStartupZeros(t *testing.T) {
+	tp := newRopeTestPipeline("head", "drum")
+	tp.stats["drum"].goodput = 0 // no signal
+
+	rc, ticks, cancel, done := newTestRope(tp, "drum",
+		toc.WithInitialRopeLength(5))
+	defer func() { cancel(); <-done }()
+
+	// Five consecutive zero-goodput intervals before any signal.
+	for i := 0; i < 5; i++ {
+		ticks <- time.Now()
+		time.Sleep(5 * time.Millisecond)
+
+		stats := rc.Stats()
+		if stats.RopeLength != 5 {
+			t.Errorf("tick %d: RopeLength = %d, want 5 (initial held)", i+1, stats.RopeLength)
+		}
+	}
+
+	// Sixth tick: valid signal arrives.
+	tp.stats["drum"].goodput = 50
+	tp.stats["drum"].itemsCompleted = 100
+	tp.stats["head"].serviceTimeDt = 500 * time.Millisecond
+	tp.stats["head"].itemsCompleted = 100
+
+	ticks <- time.Now()
+	time.Sleep(5 * time.Millisecond)
+
+	stats := rc.Stats()
+	// Should have a valid rope length now, not 5 (initial).
+	if stats.RopeLength == 5 {
+		t.Errorf("RopeLength still 5 after valid signal, expected adjustment")
+	}
+	if stats.RopeLength < 1 {
+		t.Errorf("RopeLength = %d, must be >= 1", stats.RopeLength)
+	}
+}
+
 func TestRopeHighDownstreamWIP(t *testing.T) {
 	tp := newRopeTestPipeline("head", "mid", "drum")
 	tp.stats["drum"].goodput = 50
