@@ -1181,3 +1181,61 @@ func TestSetMaxWIPCeilingTracksWorkers(t *testing.T) {
 	s.CloseInput()
 	s.Wait()
 }
+
+// ── Sojourn time tests ──────────────────────────────────────────────────
+
+func TestSojournTimeBasic(t *testing.T) {
+	ctx := context.Background()
+	s := toc.Start(ctx, slowFn, toc.Options[int]{Capacity: 5, Workers: 1})
+
+	go func() { for range s.Out() {} }()
+
+	s.Submit(ctx, 1)
+	s.Submit(ctx, 2)
+	s.CloseInput()
+	s.Wait()
+
+	stats := s.Stats()
+	if stats.SojournTime <= 0 {
+		t.Errorf("SojournTime = %v, want > 0", stats.SojournTime)
+	}
+	if stats.SojournTime < 100*time.Millisecond {
+		t.Errorf("SojournTime = %v, want >= 100ms (two 50ms items)", stats.SojournTime)
+	}
+}
+
+func TestSojournTimeIncludesAdmissionWait(t *testing.T) {
+	ctx := context.Background()
+	s := toc.Start(ctx, slowFn, toc.Options[int]{
+		Capacity: 5, Workers: 1, MaxWIP: 1,
+	})
+
+	go func() { for range s.Out() {} }()
+
+	s.Submit(ctx, 1)
+	s.Submit(ctx, 2)
+	s.CloseInput()
+	s.Wait()
+
+	stats := s.Stats()
+	// Second item waited ~50ms for first + ~50ms service. Total >= 150ms.
+	if stats.SojournTime < 130*time.Millisecond {
+		t.Errorf("SojournTime = %v, want >= 130ms (admission wait included)", stats.SojournTime)
+	}
+}
+
+func TestSojournTimeCancelledExcluded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s := toc.Start(ctx, slowFn, toc.Options[int]{Capacity: 1, Workers: 1})
+	go func() { for range s.Out() {} }()
+	s.Submit(ctx, 1)
+	s.CloseInput()
+	s.Wait()
+
+	stats := s.Stats()
+	if stats.SojournTime != 0 {
+		t.Errorf("SojournTime = %v, want 0 (no items completed)", stats.SojournTime)
+	}
+}

@@ -55,10 +55,12 @@ type IntervalStats struct {
 	Goodput           float64       // successful completions/sec: (completed - failed) / elapsed
 	ArrivalRate       float64       // submitted items/sec at this stage
 	ErrorRate         float64       // failed / completed; bounded [0,1]
+	MeanSojournTime   time.Duration // SojournTimeDelta / ItemsCompleted; includes admission wait, buffer wait, service
 	MeanServiceTime   time.Duration // ServiceTimeDelta / ItemsCompleted
 	ApproxUtilization float64       // ServiceTimeDelta / (Duration * avg workers); approximate
 
 	// Interval time deltas (cumulative across all workers).
+	SojournTimeDelta   time.Duration // sojourn time delta (admission wait + buffer wait + service; excludes output blocking)
 	ServiceTimeDelta   time.Duration
 	IdleTimeDelta      time.Duration
 	StarvedTimeDelta   time.Duration // subset of IdleTimeDelta: starvation only (excludes startup/drain)
@@ -191,6 +193,7 @@ func Delta(prev, curr Stats, elapsed time.Duration) IntervalStats {
 	is.ItemsFailed = safeDelta(prev.Failed, curr.Failed, &is.ResetDetected)
 	is.ItemsCanceled = safeDelta(prev.Canceled, curr.Canceled, &is.ResetDetected)
 
+	is.SojournTimeDelta = safeDeltaDuration(prev.SojournTime, curr.SojournTime, &is.ResetDetected)
 	is.ServiceTimeDelta = safeDeltaDuration(prev.ServiceTime, curr.ServiceTime, &is.ResetDetected)
 	is.IdleTimeDelta = safeDeltaDuration(prev.IdleTime, curr.IdleTime, &is.ResetDetected)
 	is.StarvedTimeDelta = safeDeltaDuration(prev.StarvedTime, curr.StarvedTime, &is.ResetDetected)
@@ -218,6 +221,7 @@ func Delta(prev, curr Stats, elapsed time.Duration) IntervalStats {
 		}
 		is.Goodput = float64(good) / elapsed.Seconds()
 		is.ErrorRate = float64(is.ItemsFailed) / float64(is.ItemsCompleted)
+		is.MeanSojournTime = time.Duration(is.SojournTimeDelta.Nanoseconds() / is.ItemsCompleted)
 		is.MeanServiceTime = time.Duration(is.ServiceTimeDelta.Nanoseconds() / is.ItemsCompleted)
 	}
 

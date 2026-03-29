@@ -194,6 +194,7 @@ type Stats struct {
 	Forwarded int64 // upstream Err items sent directly to out (bypassed fn)
 	Dropped   int64 // items seen but neither submitted nor forwarded (shutdown/cancel)
 
+	SojournTime       time.Duration // cumulative time from Submit until fn returns; includes admission wait, buffer wait, service; excludes output blocking
 	ServiceTime       time.Duration // cumulative time fn was executing
 	IdleTime          time.Duration // cumulative worker time waiting for input (includes startup and tail wait)
 	StarvedTime time.Duration // subset of IdleTime: cumulative worker-time (summed across workers) blocked on empty input after stage activation (first successful enqueue) and before observed drain (CloseInput). Classified by stage state at wait entry, not wake time — a wait that begins before closure may still be counted. Includes synchronous handoff waits for unbuffered (Capacity: 0) stages.
@@ -333,6 +334,7 @@ type Stage[T, R any] struct {
 	dropped            atomic.Int64 // Pipe feeder: items neither submitted nor forwarded
 	oversizeAdmissions atomic.Int64 // OversizeAllow: cumulative oversize items admitted
 
+	sojournNs atomic.Int64 // cumulative sojourn across completed items (ns)
 	serviceNs atomic.Int64
 	idleNs          atomic.Int64
 	starvedNs       atomic.Int64
@@ -1008,6 +1010,7 @@ func (s *Stage[T, R]) Stats() Stats {
 		Received:             s.received.Load(),
 		Forwarded:            s.forwarded.Load(),
 		Dropped:              s.dropped.Load(),
+		SojournTime:          time.Duration(s.sojournNs.Load()),
 		ServiceTime:          time.Duration(s.serviceNs.Load()),
 		IdleTime:             time.Duration(s.idleNs.Load()),
 		StarvedTime:          time.Duration(s.starvedNs.Load()),
@@ -1485,6 +1488,7 @@ func (s *Stage[T, R]) processItem(
 	}
 
 	outStart := time.Now()
+	s.sojournNs.Add(int64(outStart.Sub(q.submittedAt)))
 	s.out <- result
 	s.outputBlockedNs.Add(int64(time.Since(outStart)))
 }
