@@ -455,6 +455,69 @@ func TestWeightedBatcherStatsInvariant(t *testing.T) {
 	}
 }
 
+func TestWeightedBatcherWeightInvariant(t *testing.T) {
+	testErr := errors.New("err")
+	src := feedResults(
+		rslt.Ok(3), rslt.Ok(3), rslt.Err[int](testErr),
+		rslt.Ok(2), rslt.Ok(2), rslt.Ok(2),
+	)
+
+	b := toc.NewWeightedBatcher(context.Background(), src, 5, weightOf)
+
+	for range b.Out() {
+	}
+	b.Wait()
+
+	stats := b.Stats()
+
+	// ReceivedWeight should only count Ok items that were weighed.
+	// 5 Ok items: weights 3+3+2+2+2 = 12 (Err item excluded).
+	if stats.ReceivedWeight != 12 {
+		t.Errorf("ReceivedWeight = %d, want 12", stats.ReceivedWeight)
+	}
+
+	// Weight invariant: ReceivedWeight == EmittedWeight + DroppedWeight.
+	if stats.ReceivedWeight != stats.EmittedWeight+stats.DroppedWeight {
+		t.Errorf("weight invariant violated: %d != %d + %d",
+			stats.ReceivedWeight, stats.EmittedWeight, stats.DroppedWeight)
+	}
+
+	// No cancellation → all weight emitted, none dropped.
+	if stats.EmittedWeight != 12 {
+		t.Errorf("EmittedWeight = %d, want 12", stats.EmittedWeight)
+	}
+	if stats.DroppedWeight != 0 {
+		t.Errorf("DroppedWeight = %d, want 0", stats.DroppedWeight)
+	}
+}
+
+func TestWeightedBatcherOversizeWeight(t *testing.T) {
+	// Single item exceeding threshold — emitted with full weight.
+	src := feedResults(rslt.Ok(100))
+
+	b := toc.NewWeightedBatcher(context.Background(), src, 5, weightOf)
+
+	var batches [][]int
+	for r := range b.Out() {
+		if v, err := r.Unpack(); err == nil {
+			batches = append(batches, v)
+		}
+	}
+	b.Wait()
+
+	if len(batches) != 1 || len(batches[0]) != 1 || batches[0][0] != 100 {
+		t.Fatalf("expected single batch [100], got %v", batches)
+	}
+
+	stats := b.Stats()
+	if stats.ReceivedWeight != 100 {
+		t.Errorf("ReceivedWeight = %d, want 100", stats.ReceivedWeight)
+	}
+	if stats.EmittedWeight != 100 {
+		t.Errorf("EmittedWeight = %d, want 100", stats.EmittedWeight)
+	}
+}
+
 func TestWeightedBatcherBufferedWeightTracking(t *testing.T) {
 	src := make(chan rslt.Result[int], 3)
 	src <- rslt.Ok(3)

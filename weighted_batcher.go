@@ -10,12 +10,18 @@ import (
 
 // WeightedBatcherStats holds metrics for a [WeightedBatcher].
 //
-// Invariant (after Wait): Received = Emitted + Forwarded + Dropped.
+// Item-count invariant (after Wait): Received = Emitted + Forwarded + Dropped.
+// Weight invariant (after Wait): ReceivedWeight = EmittedWeight + DroppedWeight.
+// Weight counters cover Ok items that entered the accumulation path only.
+// Forwarded Err items and items discarded before weighting are excluded.
 type WeightedBatcherStats struct {
 	Received          int64         // individual items consumed from src
 	Emitted           int64         // individual Ok items included in emitted batches
 	Forwarded         int64         // Err items forwarded downstream
 	Dropped           int64         // items lost to shutdown/cancel (includes partial batch items)
+	ReceivedWeight    int64         // cumulative weight of received Ok items (excludes Err)
+	EmittedWeight     int64         // cumulative weight of items in successfully emitted batches
+	DroppedWeight     int64         // cumulative weight of Ok items lost to cancel/shutdown
 	BufferedDepth     int64         // current items in partial batch accumulator
 	BufferedWeight    int64         // current accumulated weight in partial batch
 	BatchCount        int64         // number of batch results emitted
@@ -24,13 +30,17 @@ type WeightedBatcherStats struct {
 
 // ToStats converts WeightedBatcherStats to [Stats] for use with the analyze package.
 // Maps: Received→Received, Emitted→Submitted, BatchCount→Completed,
-// Forwarded→Forwarded, Dropped→Dropped, BufferedDepth→BufferedDepth,
-// OutputBlockedTime→OutputBlockedTime.
+// EmittedWeight→CompletedWeight, Forwarded→Forwarded, Dropped→Dropped,
+// BufferedDepth→BufferedDepth, OutputBlockedTime→OutputBlockedTime.
+//
+// For WeightedBatcher, Completed means completed batches and CompletedWeight
+// means cumulative weight of items across those batches.
 func (s WeightedBatcherStats) ToStats() Stats {
 	return Stats{
 		Received:          s.Received,
 		Submitted:         s.Emitted,
 		Completed:         s.BatchCount,
+		CompletedWeight:   s.EmittedWeight,
 		Forwarded:         s.Forwarded,
 		Dropped:           s.Dropped,
 		BufferedDepth:     s.BufferedDepth,
@@ -53,6 +63,9 @@ type WeightedBatcher[T any] struct {
 	emitted         atomic.Int64
 	forwarded       atomic.Int64
 	dropped         atomic.Int64
+	receivedWeight  atomic.Int64 // cumulative weight of received Ok items (excludes Err)
+	emittedWeight   atomic.Int64 // cumulative weight of items in successfully emitted batches
+	droppedWeight   atomic.Int64 // cumulative weight of Ok items lost to cancel/shutdown
 	bufferedDepth   atomic.Int64
 	bufferedWeight  atomic.Int64
 	batchCount      atomic.Int64
@@ -81,6 +94,13 @@ type WeightedBatcher[T any] struct {
 // may still appear after cancellation. All drops are reflected in stats.
 // If the consumer stops reading Out and ctx is never canceled, the
 // WeightedBatcher blocks on output delivery and cannot drain src.
+//
+// Items whose weight exceeds the threshold trigger an immediate flush.
+// The item is appended to any existing partial batch before the
+// threshold check, so the emitted batch may contain both the oversize
+// item and previously buffered items. No blocking or rejection occurs.
+//
+// weightFn must return non-negative values; negative weights panic.
 //
 // Panics if threshold <= 0, weightFn is nil, src is nil, or ctx is nil.
 func NewWeightedBatcher[T any](
@@ -139,6 +159,9 @@ func (b *WeightedBatcher[T]) Stats() WeightedBatcherStats {
 		Emitted:           b.emitted.Load(),
 		Forwarded:         b.forwarded.Load(),
 		Dropped:           b.dropped.Load(),
+		ReceivedWeight:    b.receivedWeight.Load(),
+		EmittedWeight:     b.emittedWeight.Load(),
+		DroppedWeight:     b.droppedWeight.Load(),
 		BufferedDepth:     b.bufferedDepth.Load(),
 		BufferedWeight:    b.bufferedWeight.Load(),
 		BatchCount:        b.batchCount.Load(),
@@ -164,6 +187,7 @@ func (b *WeightedBatcher[T]) run(
 	drainAndDiscard := func() {
 		if len(buf) > 0 {
 			b.dropped.Add(int64(len(buf)))
+			b.droppedWeight.Add(int64(weight))
 			b.bufferedDepth.Store(0)
 			b.bufferedWeight.Store(0)
 			buf = nil
@@ -199,12 +223,14 @@ func (b *WeightedBatcher[T]) run(
 	// Returns false if canceled during send (caller enters discard mode).
 	emit := func() bool {
 		batch := buf
+		batchWeight := weight // snapshot before reset
 		buf = nil
 		weight = 0
 
 		if !trySend(rslt.Ok(batch)) {
 			// Batch was not delivered — count items as dropped.
 			b.dropped.Add(int64(len(batch)))
+			b.droppedWeight.Add(int64(batchWeight))
 			b.bufferedDepth.Store(0)
 			b.bufferedWeight.Store(0)
 
@@ -212,6 +238,7 @@ func (b *WeightedBatcher[T]) run(
 		}
 
 		b.emitted.Add(int64(len(batch)))
+		b.emittedWeight.Add(int64(batchWeight))
 		b.batchCount.Add(1)
 		b.bufferedDepth.Store(0)
 		b.bufferedWeight.Store(0)
@@ -256,6 +283,7 @@ func (b *WeightedBatcher[T]) run(
 			if w < 0 {
 				panic("toc.NewWeightedBatcher: weightFn returned negative weight")
 			}
+			b.receivedWeight.Add(int64(w))
 
 			buf = append(buf, v)
 			weight += w
