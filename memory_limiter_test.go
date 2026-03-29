@@ -27,10 +27,10 @@ func memRopeTestPipeline(headWeight, midWeight int64) (*toc.Pipeline, *toc.Limit
 	return p, limits
 }
 
-func TestMemoryRopeBasic(t *testing.T) {
+func TestMemoryLimiterBasic(t *testing.T) {
 	p, limits := memRopeTestPipeline(100, 200)
 
-	h := toc.MemoryRope(p, "drum", limits, 0.4, 1.0, nil)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.4, 1.0, nil)
 
 	info := memctl.MemInfo{
 		CgroupCurrent: 6 * 1024 * 1024 * 1024,
@@ -56,10 +56,10 @@ func TestMemoryRopeBasic(t *testing.T) {
 	}
 }
 
-func TestMemoryRopeNoHeadroom(t *testing.T) {
+func TestMemoryLimiterNoHeadroom(t *testing.T) {
 	p, limits := memRopeTestPipeline(0, 0)
 
-	h := toc.MemoryRope(p, "drum", limits, 0.5, 1.0, nil)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.5, 1.0, nil)
 
 	info := memctl.MemInfo{}
 	h.Callback()(context.Background(), info)
@@ -69,10 +69,10 @@ func TestMemoryRopeNoHeadroom(t *testing.T) {
 	}
 }
 
-func TestMemoryRopeZeroHeadroom(t *testing.T) {
+func TestMemoryLimiterZeroHeadroom(t *testing.T) {
 	p, limits := memRopeTestPipeline(100, 200)
 
-	h := toc.MemoryRope(p, "drum", limits, 0.5, 1.0, nil)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.5, 1.0, nil)
 
 	info := memctl.MemInfo{
 		CgroupCurrent: 10 * 1024 * 1024 * 1024,
@@ -88,7 +88,7 @@ func TestMemoryRopeZeroHeadroom(t *testing.T) {
 	}
 }
 
-func TestMemoryRopeHighDownstreamWeight(t *testing.T) {
+func TestMemoryLimiterHighDownstreamWeight(t *testing.T) {
 	p := toc.NewPipeline()
 	p.AddStage("head", func() toc.Stats { return toc.Stats{AdmittedWeight: 50, ActiveWorkers: 1} })
 	p.AddStage("drum", func() toc.Stats { return toc.Stats{ActiveWorkers: 1} })
@@ -101,7 +101,7 @@ func TestMemoryRopeHighDownstreamWeight(t *testing.T) {
 		100, 0,
 	)
 
-	h := toc.MemoryRope(p, "drum", limits, 0.5, 1.0, nil)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.5, 1.0, nil)
 
 	info := memctl.MemInfo{
 		SystemAvailable:   100,
@@ -116,13 +116,13 @@ func TestMemoryRopeHighDownstreamWeight(t *testing.T) {
 	}
 }
 
-func TestMemoryRopeLogOutput(t *testing.T) {
+func TestMemoryLimiterLogOutput(t *testing.T) {
 	p, limits := memRopeTestPipeline(0, 0)
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
 
-	h := toc.MemoryRope(p, "drum", limits, 0.5, 1.0, logger)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.5, 1.0, logger)
 
 	info := memctl.MemInfo{
 		SystemAvailable:   1024 * 1024 * 1024,
@@ -136,10 +136,10 @@ func TestMemoryRopeLogOutput(t *testing.T) {
 	t.Log(buf.String())
 }
 
-func TestMemoryRopeStats(t *testing.T) {
+func TestMemoryLimiterStats(t *testing.T) {
 	p, limits := memRopeTestPipeline(0, 0)
 
-	h := toc.MemoryRope(p, "drum", limits, 0.5, 1.0, nil)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.5, 1.0, nil)
 
 	stats := h.Stats()
 	if stats.Headroom != 0 || stats.Budget != 0 || stats.Adjustments != 0 {
@@ -161,7 +161,7 @@ func TestMemoryRopeStats(t *testing.T) {
 	}
 }
 
-func TestMemoryRopeComposesWithProcessingRope(t *testing.T) {
+func TestMemoryLimiterComposesWithProcessingRope(t *testing.T) {
 	// Both memory and processing rope propose to the same LimitManager.
 	// The tighter one governs.
 	p := toc.NewPipeline()
@@ -180,7 +180,7 @@ func TestMemoryRopeComposesWithProcessingRope(t *testing.T) {
 	limits.ProposeWeight(toc.LimitSourceWeightRope, 500)
 
 	// Memory rope proposes weight 200 (tighter).
-	h := toc.MemoryRope(p, "drum", limits, 0.5, 1.0, nil)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.5, 1.0, nil)
 	info := memctl.MemInfo{
 		SystemAvailable:   400, // headroom=400, budget=200
 		SystemAvailableOK: true,
@@ -192,16 +192,16 @@ func TestMemoryRopeComposesWithProcessingRope(t *testing.T) {
 	if snap.EffectiveWeight != 200 {
 		t.Errorf("EffectiveWeight = %d, want 200 (memory tighter)", snap.EffectiveWeight)
 	}
-	if snap.WeightSource != toc.LimitSourceMemoryRope {
+	if snap.WeightSource != toc.LimitSourceMemoryLimiter {
 		t.Errorf("WeightSource = %q, want memory-rope", snap.WeightSource)
 	}
 }
 
-func TestMemoryRopeAsymmetricDamping(t *testing.T) {
+func TestMemoryLimiterAsymmetricDamping(t *testing.T) {
 	p, limits := memRopeTestPipeline(0, 0)
 
 	// relaxRate=0.2: relax 20% of gap per callback.
-	h := toc.MemoryRope(p, "drum", limits, 0.5, 0.2, nil)
+	h := toc.MemoryLimiter(p, "drum", limits, 0.5, 0.2, nil)
 	cb := h.Callback()
 
 	// First callback: 2GB headroom → budget = 1GB. Applied instantly.

@@ -824,7 +824,10 @@ func printComparison(results []scenarioResult) {
 	fmt.Printf(`
   %sHow this maps to toc:%s
 
-    // 1. Build the working pipeline.
+  The demo's "drum" is a constrained stage in a normal toc pipeline.
+
+  Build the runtime stages that do the actual work:
+
     prep := toc.Start[Order, Prepped](ctx, prepFn, toc.Options[Order]{
         Capacity: 10, Workers: 4,
     })
@@ -833,7 +836,8 @@ func printComparison(results []scenarioResult) {
     plate := toc.Pipe[Plated, Plated](ctx, grill.Out(), plateFn,
         toc.Options[Plated]{Capacity: 10, Workers: 2})
 
-    // 2. Separately, declare the topology for analysis/control.
+  Then, separately, declare the topology for analysis and control:
+
     pipeline := toc.NewPipeline()
     pipeline.AddStage("prep",  prep.Stats)
     pipeline.AddStage("grill", grill.Stats)
@@ -841,22 +845,21 @@ func printComparison(results []scenarioResult) {
     pipeline.AddEdge("prep", "grill")
     pipeline.AddEdge("grill", "plate")
     pipeline.Freeze()
-    // Pass pipeline to Analyzer or RopeController.
+
+  Pass that Pipeline to tools like Analyzer or RopeController.
+  Stage execution is independent of the Pipeline object.
 
   Capacity is the buffer. Workers is the staffing. MaxWIP is
   the WIP cap -- what the demo calls the limit on the grill.
 
-  The stages run independently of Pipeline. Pipeline is the
-  topology you pass to tools like Analyzer or RopeController.
-
   Register every stage, not just the one you expect to be the
   bottleneck -- the constraint can move. From per-stage stats,
-  the Analyzer infers which stage is currently acting as the
-  constraint. Separately, you choose whether to apply controls
-  such as MaxWIP.
+  the Analyzer can infer which stage is currently acting as the
+  constraint. Separately, you choose whether and where to apply
+  controls such as MaxWIP.
 
-  The arrival process (Poisson, fixed-interval, etc.) is ordinary
-  application code; toc starts at the stage boundaries.
+  The arrival process is ordinary application code; toc starts
+  at the pipeline stage boundaries.
 `, colorBold, colorReset)
 }
 

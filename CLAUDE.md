@@ -29,7 +29,7 @@ All naming traces to Goldratt's TOC terminology. Do not rename away from TOC ter
 
 Cross-repo deps on `github.com/binaryphile/fluentfp`:
 - `rslt` — Result type for pipeline channels
-- `memctl` — cgroup memory monitoring for memory rope
+- `memctl` — cgroup memory monitoring for memory limiter
 
 ## Testing: Khorikov Principles
 

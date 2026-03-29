@@ -17,8 +17,8 @@ const (
 	// LimitSourceWeightRope is the weight-based processing rope.
 	LimitSourceWeightRope LimitSource = "processing-weight-rope"
 
-	// LimitSourceMemoryRope is the memory headroom rope.
-	LimitSourceMemoryRope LimitSource = "memory-rope"
+	// LimitSourceMemoryLimiter is the memory headroom limiter.
+	LimitSourceMemoryLimiter LimitSource = "memory-limiter"
 
 	// limitSourceDefault is the permanent baseline (internal only).
 	limitSourceDefault LimitSource = "default"

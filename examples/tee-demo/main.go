@@ -243,7 +243,7 @@ What to try:
 `, throughput, blockedRatio, fastStarvedPct, reverseHint(*reverse))
 
 	fmt.Print(`
-How this maps to toc:
+How Tee behaves in toc:
 
     upstream := toc.Start[int, int](ctx, upstreamFn, opts)
     tee := toc.NewTee[int](ctx, upstream.Out(), 2)
@@ -251,13 +251,13 @@ How this maps to toc:
     fast := toc.Pipe[int, int](ctx, tee.Branch(0), fastFn, opts)
     slow := toc.Pipe[int, int](ctx, tee.Branch(1), slowFn, opts)
 
-  NewTee splits one stream into N lockstep branches. Each item
-  must be delivered to every branch before the next can flow.
-  This is not independent fan-out: one slow or stalled branch
-  backpressures all branches.
+  Tee is not independent fan-out. Each item must be delivered to
+  every branch before the next can flow, so one slow or stalled
+  branch backpressures the entire tee.
 
-  Tee also reports branch-specific delivery and blocked-time
-  stats for observability.
+  In addition to normal stage metrics downstream, Tee reports
+  branch-specific delivery and blocked-time stats, which makes it
+  visible in analysis when one branch is stalling the rest.
 `)
 }
 
