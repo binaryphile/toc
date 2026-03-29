@@ -820,6 +820,44 @@ func printComparison(results []scenarioResult) {
 		ratio := results[0].ticketSec / results[3].ticketSec
 		fmt.Printf("\n  Scenario 1 vs 4: %.0fx total ticket-seconds at the grill -- same work done.\n", ratio)
 	}
+
+	fmt.Printf(`
+  %sHow this maps to toc:%s
+
+    // 1. Build the working pipeline.
+    prep := toc.Start[Order, Prepped](ctx, prepFn, toc.Options[Order]{
+        Capacity: 10, Workers: 4,
+    })
+    grill := toc.Pipe[Prepped, Plated](ctx, prep.Out(), grillFn,
+        toc.Options[Prepped]{Capacity: 4, Workers: 1, MaxWIP: 3})
+    plate := toc.Pipe[Plated, Plated](ctx, grill.Out(), plateFn,
+        toc.Options[Plated]{Capacity: 10, Workers: 2})
+
+    // 2. Separately, declare the topology for analysis/control.
+    pipeline := toc.NewPipeline()
+    pipeline.AddStage("prep",  prep.Stats)
+    pipeline.AddStage("grill", grill.Stats)
+    pipeline.AddStage("plate", plate.Stats)
+    pipeline.AddEdge("prep", "grill")
+    pipeline.AddEdge("grill", "plate")
+    pipeline.Freeze()
+    // Pass pipeline to Analyzer or RopeController.
+
+  Capacity is the buffer. Workers is the staffing. MaxWIP is
+  the WIP cap -- what the demo calls the limit on the grill.
+
+  The stages run independently of Pipeline. Pipeline is the
+  topology you pass to tools like Analyzer or RopeController.
+
+  Register every stage, not just the one you expect to be the
+  bottleneck -- the constraint can move. From per-stage stats,
+  the Analyzer infers which stage is currently acting as the
+  constraint. Separately, you choose whether to apply controls
+  such as MaxWIP.
+
+  The arrival process (Poisson, fixed-interval, etc.) is ordinary
+  application code; toc starts at the stage boundaries.
+`, colorBold, colorReset)
 }
 
 func queueSparkline(timeline []snapshot, maxQ int64) string {

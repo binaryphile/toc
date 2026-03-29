@@ -241,6 +241,24 @@ What to try:
   - Replace Tee with an async fan-out (decouples branches, loses ordering)
   - Add a buffered intermediary (absorbs bursts, doesn't change steady-state)
 `, throughput, blockedRatio, fastStarvedPct, reverseHint(*reverse))
+
+	fmt.Print(`
+How this maps to toc:
+
+    upstream := toc.Start[int, int](ctx, upstreamFn, opts)
+    tee := toc.NewTee[int](ctx, upstream.Out(), 2)
+
+    fast := toc.Pipe[int, int](ctx, tee.Branch(0), fastFn, opts)
+    slow := toc.Pipe[int, int](ctx, tee.Branch(1), slowFn, opts)
+
+  NewTee splits one stream into N lockstep branches. Each item
+  must be delivered to every branch before the next can flow.
+  This is not independent fan-out: one slow or stalled branch
+  backpressures all branches.
+
+  Tee also reports branch-specific delivery and blocked-time
+  stats for observability.
+`)
 }
 
 func reverseHint(reversed bool) string {
