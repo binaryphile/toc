@@ -1,5 +1,7 @@
 package toc
 
+import "fmt"
+
 // Pipeline is a DAG topology descriptor for a toc pipeline. Configure
 // with [Pipeline.AddStage] and [Pipeline.AddEdge], then call
 // [Pipeline.Freeze]. After Freeze, the Pipeline is immutable and safe
@@ -325,6 +327,31 @@ func (p *Pipeline) hasPath(from, to string) bool {
 		}
 	}
 	return false
+}
+
+// ResolveSegment derives and validates the linear segment from controlStage
+// to drum. Returns the ordered stage list (including controlStage, excluding
+// drum) or an error. The pipeline must be frozen.
+//
+// The control stage may have upstream predecessors outside the segment.
+// Internal segment nodes must have in-degree=1 and out-degree=1.
+// The drum must have in-degree=1.
+func (p *Pipeline) ResolveSegment(controlStage, drum string) ([]string, error) {
+	p.mustFrozen()
+	if _, ok := p.stages[controlStage]; !ok {
+		return nil, fmt.Errorf("toc: control stage %q not found in pipeline", controlStage)
+	}
+	if _, ok := p.stages[drum]; !ok {
+		return nil, fmt.Errorf("toc: drum %q not found in pipeline", drum)
+	}
+	segment, err := deriveSegment(p, controlStage, drum)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSegment(p, controlStage, drum, segment); err != nil {
+		return nil, err
+	}
+	return segment, nil
 }
 
 // StageStats returns the stats accessor for a named stage.
