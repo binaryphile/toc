@@ -798,6 +798,112 @@ func TestOversizeWaitBlocksThenAdmits(t *testing.T) {
 	s.Wait()
 }
 
+func TestOversizeAllowAdmitsImmediately(t *testing.T) {
+	ctx := context.Background()
+	s := toc.Start(ctx, identityFn, toc.Options[int]{
+		Capacity:       5,
+		Workers:        1,
+		MaxWIPWeight:   10,
+		Weight:         func(n int) int64 { return int64(n) },
+		OversizePolicy: toc.OversizeAllow,
+	})
+
+	go func() { for range s.Out() {} }()
+
+	// Submit oversize item — should admit immediately, not block.
+	err := s.Submit(ctx, 50) // weight 50 > limit 10
+	if err != nil {
+		t.Fatalf("OversizeAllow Submit: %v", err)
+	}
+
+	// AdmittedWeight should include the full oversize weight.
+	stats := s.Stats()
+	if stats.OversizeAdmissions != 1 {
+		t.Errorf("OversizeAdmissions = %d, want 1", stats.OversizeAdmissions)
+	}
+
+	s.CloseInput()
+	s.Wait()
+}
+
+func TestOversizeAllowBoundedDebt(t *testing.T) {
+	ctx := context.Background()
+	s := toc.Start(ctx, slowFn, toc.Options[int]{
+		Capacity:       5,
+		Workers:        1,
+		MaxWIPWeight:   10,
+		Weight:         func(n int) int64 { return int64(n) },
+		OversizePolicy: toc.OversizeAllow,
+	})
+
+	go func() { for range s.Out() {} }()
+
+	// First oversize admitted immediately.
+	if err := s.Submit(ctx, 50); err != nil {
+		t.Fatalf("first oversize: %v", err)
+	}
+
+	// Second oversize should block (debt exists: admittedWeight 50 > limit 10).
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Submit(ctx, 50)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("second oversize should block while debt exists, got %v", err)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: blocked.
+	}
+
+	s.CloseInput()
+	s.Wait()
+}
+
+func TestOversizeAllowRespectsCountLimit(t *testing.T) {
+	ctx := context.Background()
+
+	// Use a function that blocks until context cancel — items stay in-flight.
+	blockFn := func(ctx context.Context, n int) (int, error) {
+		<-ctx.Done()
+		return n, ctx.Err()
+	}
+
+	ctx2, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	s := toc.Start(ctx2, blockFn, toc.Options[int]{
+		Capacity:       1,
+		Workers:        1,
+		MaxWIP:         2, // only 2 items
+		MaxWIPWeight:   1000,
+		Weight:         func(n int) int64 { return int64(n) },
+		OversizePolicy: toc.OversizeAllow,
+	})
+
+	go func() { for range s.Out() {} }()
+
+	// Fill count: 2 items (1 buffered + 1 in worker, both blocked).
+	s.Submit(ctx2, 1)
+	s.Submit(ctx2, 1)
+	time.Sleep(10 * time.Millisecond) // let worker pick up item
+
+	// Oversize item should block on count (MaxWIP=2 full), not weight.
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Submit(ctx2, 5000) // oversize: 5000 > 1000
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("oversize should block when count is full")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	s.Wait()
+}
+
 func TestMaxWIPWeightAndCountBothEnforced(t *testing.T) {
 	ctx := context.Background()
 	s := toc.Start(ctx, slowFn, toc.Options[int]{

@@ -82,6 +82,14 @@ const (
 	// admit the item (or context is canceled / stage closed). Use when
 	// the rope controller may raise the limit dynamically.
 	OversizeWait
+
+	// OversizeAllow admits one oversize item immediately, bypassing
+	// the weight check. The full weight is added to AdmittedWeight,
+	// making the over-admission visible to the rope controller.
+	// Count limit (MaxWIP) still applies. While oversize debt exists
+	// (AdmittedWeight > MaxWIPWeight), subsequent oversize items
+	// block like [OversizeWait].
+	OversizeAllow
 )
 
 // Options configures a [Stage].
@@ -193,7 +201,8 @@ type Stats struct {
 
 	BufferedDepth  int64 // approximate items in queue; may transiently be negative mid-flight; 0 when Capacity is 0 (unbuffered)
 	InFlightWeight  int64 // weighted cost of items currently in fn (stats-only, not admission)
-	CompletedWeight int64 // cumulative weight of completed items; equals Completed when Options.Weight is nil
+	CompletedWeight    int64 // cumulative weight of completed items; equals Completed when Options.Weight is nil
+	OversizeAdmissions int64 // cumulative oversize items admitted via OversizeAllow
 	QueueCapacity  int   // configured capacity
 
 	Paused        bool  // true if admission is paused via PauseAdmission
@@ -253,9 +262,10 @@ type testHooks struct {
 // elem is the back-pointer into the waiter list for O(1) removal;
 // nil after removal (granted or revoked).
 type waiter struct {
-	ready  chan struct{}
-	elem   *list.Element
-	weight int64 // frozen item weight for grant check
+	ready          chan struct{}
+	elem           *list.Element
+	weight         int64 // frozen item weight for grant check
+	oversizeExempt bool  // OversizeAllow: bypass weight check when granting
 }
 
 // queued wraps an item with its pre-computed weight and caller context.
@@ -320,9 +330,10 @@ type Stage[T, R any] struct {
 	bufferedDepth atomic.Int64
 	received      atomic.Int64 // Pipe feeder: items consumed from src
 	forwarded     atomic.Int64 // Pipe feeder: upstream Err items sent to out
-	dropped       atomic.Int64 // Pipe feeder: items neither submitted nor forwarded
+	dropped            atomic.Int64 // Pipe feeder: items neither submitted nor forwarded
+	oversizeAdmissions atomic.Int64 // OversizeAllow: cumulative oversize items admitted
 
-	serviceNs       atomic.Int64
+	serviceNs atomic.Int64
 	idleNs          atomic.Int64
 	starvedNs       atomic.Int64
 	outputBlockedNs atomic.Int64
@@ -660,20 +671,30 @@ func (s *Stage[T, R]) acquireAdmission(ctx context.Context, weight int64) error 
 	}
 
 	// Oversize items: weight exceeds the limit.
+	oversizeExempt := false
 	if s.maxWIPWeight >= 0 && weight > s.maxWIPWeight {
-		if s.oversizePolicy == OversizeReject {
+		switch s.oversizePolicy {
+		case OversizeReject:
 			s.admissionMu.Unlock()
 			return ErrWeightExceedsLimit
+		case OversizeAllow:
+			// Allow one oversize item if no existing debt.
+			if s.admittedWeight <= s.maxWIPWeight {
+				oversizeExempt = true
+			}
+			// else: debt exists, fall through like OversizeWait.
+		default:
+			// OversizeWait: fall through to waiter queue.
 		}
-		// OversizeWait: fall through to waiter queue. The item will
-		// block until SetMaxWIPWeight raises the limit enough, or
-		// context cancel / stage close.
 	}
 
-	// Fast path: both count and weight allow, not paused.
-	if !s.paused && s.admitted < int64(s.maxWIP) && s.weightAllows(weight) {
+	// Fast path: count allows, weight allows (or exempt for oversize).
+	if !s.paused && s.admitted < int64(s.maxWIP) && (oversizeExempt || s.weightAllows(weight)) {
 		s.admitted++
 		s.admittedWeight += weight
+		if oversizeExempt {
+			s.oversizeAdmissions.Add(1)
+		}
 		s.admissionMu.Unlock()
 
 		if h := s.hooks.Load(); h != nil && h.afterAdmitFastPath != nil {
@@ -684,7 +705,7 @@ func (s *Stage[T, R]) acquireAdmission(ctx context.Context, weight int64) error 
 	}
 
 	// Slow path: enqueue a waiter and block.
-	w := &waiter{ready: make(chan struct{}), weight: weight}
+	w := &waiter{ready: make(chan struct{}), weight: weight, oversizeExempt: oversizeExempt}
 	w.elem = s.waiters.PushBack(w)
 	if s.waiters.Len() > s.maxWaiterCount {
 		s.maxWaiterCount = s.waiters.Len()
@@ -993,7 +1014,8 @@ func (s *Stage[T, R]) Stats() Stats {
 		OutputBlockedTime:    time.Duration(s.outputBlockedNs.Load()),
 		BufferedDepth:        depth,
 		InFlightWeight:       s.inFlightWeight.Load(),
-		CompletedWeight:     s.completedWeight.Load(),
+		CompletedWeight:      s.completedWeight.Load(),
+		OversizeAdmissions:  s.oversizeAdmissions.Load(),
 		QueueCapacity:        s.capacity,
 		Paused:               paused,
 		MaxWIP:               maxWIP,
@@ -1049,13 +1071,16 @@ func (s *Stage[T, R]) grantWaitersLocked() {
 	for s.waiters.Len() > 0 && s.admitted < int64(s.maxWIP) {
 		e := s.waiters.Front()
 		w := e.Value.(*waiter)
-		if !s.weightAllows(w.weight) {
+		if !w.oversizeExempt && !s.weightAllows(w.weight) {
 			break // FIFO head-of-line blocking: heavy item blocks lighter ones
 		}
 		s.waiters.Remove(e)
 		w.elem = nil // mark as granted — removeWaiter will see nil
 		s.admitted++
 		s.admittedWeight += w.weight
+		if w.oversizeExempt {
+			s.oversizeAdmissions.Add(1)
+		}
 		close(w.ready)
 		if h := s.hooks.Load(); h != nil && h.onGrant != nil {
 			h.onGrant() // UNDER LOCK — must not block.
