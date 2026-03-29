@@ -79,12 +79,31 @@ message StageDiagnosis {
   int64 arrivals = 10;
 }
 
+enum ConstraintState {
+  CONSTRAINT_STATE_UNSPECIFIED = 0;
+  CONSTRAINT_STATE_UNKNOWN = 1;
+  CONSTRAINT_STATE_UNCONSTRAINED = 2;
+  CONSTRAINT_STATE_AMBIGUOUS = 3;
+  CONSTRAINT_STATE_EMERGING = 4;
+  CONSTRAINT_STATE_IDENTIFIED = 5;
+}
+
+enum ConstraintSource {
+  CONSTRAINT_SOURCE_UNSPECIFIED = 0;
+  CONSTRAINT_SOURCE_INFERRED = 1;
+  CONSTRAINT_SOURCE_MANUAL_OVERRIDE = 2;
+}
+
 // Diagnosis is the output of one analyzer step.
 message Diagnosis {
   string constraint = 1;
-  double confidence = 2;
+  double support_freshness = 2;
   repeated StageDiagnosis stages = 3;
   int64 starvation_count = 4;
+  ConstraintState constraint_state = 5;
+  ConstraintSource constraint_source = 6;
+  string candidate_constraint = 7;
+  int32 unsupported_count = 8;
 }
 
 // ObservationBatch wraps a set of observations for one analysis window.

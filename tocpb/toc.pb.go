@@ -90,6 +90,113 @@ func (StageState) EnumDescriptor() ([]byte, []int) {
 	return file_toc_v1_toc_proto_rawDescGZIP(), []int{0}
 }
 
+type ConstraintState int32
+
+const (
+	ConstraintState_CONSTRAINT_STATE_UNSPECIFIED   ConstraintState = 0
+	ConstraintState_CONSTRAINT_STATE_UNKNOWN       ConstraintState = 1
+	ConstraintState_CONSTRAINT_STATE_UNCONSTRAINED ConstraintState = 2
+	ConstraintState_CONSTRAINT_STATE_AMBIGUOUS     ConstraintState = 3
+	ConstraintState_CONSTRAINT_STATE_EMERGING      ConstraintState = 4
+	ConstraintState_CONSTRAINT_STATE_IDENTIFIED    ConstraintState = 5
+)
+
+// Enum value maps for ConstraintState.
+var (
+	ConstraintState_name = map[int32]string{
+		0: "CONSTRAINT_STATE_UNSPECIFIED",
+		1: "CONSTRAINT_STATE_UNKNOWN",
+		2: "CONSTRAINT_STATE_UNCONSTRAINED",
+		3: "CONSTRAINT_STATE_AMBIGUOUS",
+		4: "CONSTRAINT_STATE_EMERGING",
+		5: "CONSTRAINT_STATE_IDENTIFIED",
+	}
+	ConstraintState_value = map[string]int32{
+		"CONSTRAINT_STATE_UNSPECIFIED":   0,
+		"CONSTRAINT_STATE_UNKNOWN":       1,
+		"CONSTRAINT_STATE_UNCONSTRAINED": 2,
+		"CONSTRAINT_STATE_AMBIGUOUS":     3,
+		"CONSTRAINT_STATE_EMERGING":      4,
+		"CONSTRAINT_STATE_IDENTIFIED":    5,
+	}
+)
+
+func (x ConstraintState) Enum() *ConstraintState {
+	p := new(ConstraintState)
+	*p = x
+	return p
+}
+
+func (x ConstraintState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ConstraintState) Descriptor() protoreflect.EnumDescriptor {
+	return file_toc_v1_toc_proto_enumTypes[1].Descriptor()
+}
+
+func (ConstraintState) Type() protoreflect.EnumType {
+	return &file_toc_v1_toc_proto_enumTypes[1]
+}
+
+func (x ConstraintState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ConstraintState.Descriptor instead.
+func (ConstraintState) EnumDescriptor() ([]byte, []int) {
+	return file_toc_v1_toc_proto_rawDescGZIP(), []int{1}
+}
+
+type ConstraintSource int32
+
+const (
+	ConstraintSource_CONSTRAINT_SOURCE_UNSPECIFIED     ConstraintSource = 0
+	ConstraintSource_CONSTRAINT_SOURCE_INFERRED        ConstraintSource = 1
+	ConstraintSource_CONSTRAINT_SOURCE_MANUAL_OVERRIDE ConstraintSource = 2
+)
+
+// Enum value maps for ConstraintSource.
+var (
+	ConstraintSource_name = map[int32]string{
+		0: "CONSTRAINT_SOURCE_UNSPECIFIED",
+		1: "CONSTRAINT_SOURCE_INFERRED",
+		2: "CONSTRAINT_SOURCE_MANUAL_OVERRIDE",
+	}
+	ConstraintSource_value = map[string]int32{
+		"CONSTRAINT_SOURCE_UNSPECIFIED":     0,
+		"CONSTRAINT_SOURCE_INFERRED":        1,
+		"CONSTRAINT_SOURCE_MANUAL_OVERRIDE": 2,
+	}
+)
+
+func (x ConstraintSource) Enum() *ConstraintSource {
+	p := new(ConstraintSource)
+	*p = x
+	return p
+}
+
+func (x ConstraintSource) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ConstraintSource) Descriptor() protoreflect.EnumDescriptor {
+	return file_toc_v1_toc_proto_enumTypes[2].Descriptor()
+}
+
+func (ConstraintSource) Type() protoreflect.EnumType {
+	return &file_toc_v1_toc_proto_enumTypes[2]
+}
+
+func (x ConstraintSource) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ConstraintSource.Descriptor instead.
+func (ConstraintSource) EnumDescriptor() ([]byte, []int) {
+	return file_toc_v1_toc_proto_rawDescGZIP(), []int{2}
+}
+
 // StageObservation is the canonical input to the analyzer.
 // One per stage per analysis window.
 //
@@ -346,13 +453,17 @@ func (x *StageDiagnosis) GetArrivals() int64 {
 
 // Diagnosis is the output of one analyzer step.
 type Diagnosis struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Constraint      string                 `protobuf:"bytes,1,opt,name=constraint,proto3" json:"constraint,omitempty"`
-	Confidence      float64                `protobuf:"fixed64,2,opt,name=confidence,proto3" json:"confidence,omitempty"`
-	Stages          []*StageDiagnosis      `protobuf:"bytes,3,rep,name=stages,proto3" json:"stages,omitempty"`
-	StarvationCount int64                  `protobuf:"varint,4,opt,name=starvation_count,json=starvationCount,proto3" json:"starvation_count,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Constraint          string                 `protobuf:"bytes,1,opt,name=constraint,proto3" json:"constraint,omitempty"`
+	SupportFreshness    float64                `protobuf:"fixed64,2,opt,name=support_freshness,json=supportFreshness,proto3" json:"support_freshness,omitempty"`
+	Stages              []*StageDiagnosis      `protobuf:"bytes,3,rep,name=stages,proto3" json:"stages,omitempty"`
+	StarvationCount     int64                  `protobuf:"varint,4,opt,name=starvation_count,json=starvationCount,proto3" json:"starvation_count,omitempty"`
+	ConstraintState     ConstraintState        `protobuf:"varint,5,opt,name=constraint_state,json=constraintState,proto3,enum=toc.v1.ConstraintState" json:"constraint_state,omitempty"`
+	ConstraintSource    ConstraintSource       `protobuf:"varint,6,opt,name=constraint_source,json=constraintSource,proto3,enum=toc.v1.ConstraintSource" json:"constraint_source,omitempty"`
+	CandidateConstraint string                 `protobuf:"bytes,7,opt,name=candidate_constraint,json=candidateConstraint,proto3" json:"candidate_constraint,omitempty"`
+	UnsupportedCount    int32                  `protobuf:"varint,8,opt,name=unsupported_count,json=unsupportedCount,proto3" json:"unsupported_count,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Diagnosis) Reset() {
@@ -392,9 +503,9 @@ func (x *Diagnosis) GetConstraint() string {
 	return ""
 }
 
-func (x *Diagnosis) GetConfidence() float64 {
+func (x *Diagnosis) GetSupportFreshness() float64 {
 	if x != nil {
-		return x.Confidence
+		return x.SupportFreshness
 	}
 	return 0
 }
@@ -409,6 +520,34 @@ func (x *Diagnosis) GetStages() []*StageDiagnosis {
 func (x *Diagnosis) GetStarvationCount() int64 {
 	if x != nil {
 		return x.StarvationCount
+	}
+	return 0
+}
+
+func (x *Diagnosis) GetConstraintState() ConstraintState {
+	if x != nil {
+		return x.ConstraintState
+	}
+	return ConstraintState_CONSTRAINT_STATE_UNSPECIFIED
+}
+
+func (x *Diagnosis) GetConstraintSource() ConstraintSource {
+	if x != nil {
+		return x.ConstraintSource
+	}
+	return ConstraintSource_CONSTRAINT_SOURCE_UNSPECIFIED
+}
+
+func (x *Diagnosis) GetCandidateConstraint() string {
+	if x != nil {
+		return x.CandidateConstraint
+	}
+	return ""
+}
+
+func (x *Diagnosis) GetUnsupportedCount() int32 {
+	if x != nil {
+		return x.UnsupportedCount
 	}
 	return 0
 }
@@ -530,16 +669,18 @@ const file_toc_v1_toc_proto_rawDesc = "" +
 	"\barrivals\x18\n" +
 	" \x01(\x03R\barrivalsB\r\n" +
 	"\v_idle_ratioB\x10\n" +
-	"\x0e_blocked_ratio\"\xa6\x01\n" +
+	"\x0e_blocked_ratio\"\x9e\x03\n" +
 	"\tDiagnosis\x12\x1e\n" +
 	"\n" +
 	"constraint\x18\x01 \x01(\tR\n" +
-	"constraint\x12\x1e\n" +
-	"\n" +
-	"confidence\x18\x02 \x01(\x01R\n" +
-	"confidence\x12.\n" +
+	"constraint\x12+\n" +
+	"\x11support_freshness\x18\x02 \x01(\x01R\x10supportFreshness\x12.\n" +
 	"\x06stages\x18\x03 \x03(\v2\x16.toc.v1.StageDiagnosisR\x06stages\x12)\n" +
-	"\x10starvation_count\x18\x04 \x01(\x03R\x0fstarvationCount\"\xd3\x01\n" +
+	"\x10starvation_count\x18\x04 \x01(\x03R\x0fstarvationCount\x12B\n" +
+	"\x10constraint_state\x18\x05 \x01(\x0e2\x17.toc.v1.ConstraintStateR\x0fconstraintState\x12E\n" +
+	"\x11constraint_source\x18\x06 \x01(\x0e2\x18.toc.v1.ConstraintSourceR\x10constraintSource\x121\n" +
+	"\x14candidate_constraint\x18\a \x01(\tR\x13candidateConstraint\x12+\n" +
+	"\x11unsupported_count\x18\b \x01(\x05R\x10unsupportedCount\"\xd3\x01\n" +
 	"\x10ObservationBatch\x12\x1f\n" +
 	"\vpipeline_id\x18\x01 \x01(\tR\n" +
 	"pipelineId\x12.\n" +
@@ -553,7 +694,18 @@ const file_toc_v1_toc_proto_rawDesc = "" +
 	"\x13STAGE_STATE_STARVED\x10\x02\x12\x17\n" +
 	"\x13STAGE_STATE_BLOCKED\x10\x03\x12\x19\n" +
 	"\x15STAGE_STATE_SATURATED\x10\x04\x12\x16\n" +
-	"\x12STAGE_STATE_BROKEN\x10\x05B$Z\"codeberg.org/binaryphile/toc/tocpbb\x06proto3"
+	"\x12STAGE_STATE_BROKEN\x10\x05*\xd5\x01\n" +
+	"\x0fConstraintState\x12 \n" +
+	"\x1cCONSTRAINT_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18CONSTRAINT_STATE_UNKNOWN\x10\x01\x12\"\n" +
+	"\x1eCONSTRAINT_STATE_UNCONSTRAINED\x10\x02\x12\x1e\n" +
+	"\x1aCONSTRAINT_STATE_AMBIGUOUS\x10\x03\x12\x1d\n" +
+	"\x19CONSTRAINT_STATE_EMERGING\x10\x04\x12\x1f\n" +
+	"\x1bCONSTRAINT_STATE_IDENTIFIED\x10\x05*|\n" +
+	"\x10ConstraintSource\x12!\n" +
+	"\x1dCONSTRAINT_SOURCE_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aCONSTRAINT_SOURCE_INFERRED\x10\x01\x12%\n" +
+	"!CONSTRAINT_SOURCE_MANUAL_OVERRIDE\x10\x02B$Z\"codeberg.org/binaryphile/toc/tocpbb\x06proto3"
 
 var (
 	file_toc_v1_toc_proto_rawDescOnce sync.Once
@@ -567,24 +719,28 @@ func file_toc_v1_toc_proto_rawDescGZIP() []byte {
 	return file_toc_v1_toc_proto_rawDescData
 }
 
-var file_toc_v1_toc_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_toc_v1_toc_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_toc_v1_toc_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_toc_v1_toc_proto_goTypes = []any{
 	(StageState)(0),          // 0: toc.v1.StageState
-	(*StageObservation)(nil), // 1: toc.v1.StageObservation
-	(*StageDiagnosis)(nil),   // 2: toc.v1.StageDiagnosis
-	(*Diagnosis)(nil),        // 3: toc.v1.Diagnosis
-	(*ObservationBatch)(nil), // 4: toc.v1.ObservationBatch
+	(ConstraintState)(0),     // 1: toc.v1.ConstraintState
+	(ConstraintSource)(0),    // 2: toc.v1.ConstraintSource
+	(*StageObservation)(nil), // 3: toc.v1.StageObservation
+	(*StageDiagnosis)(nil),   // 4: toc.v1.StageDiagnosis
+	(*Diagnosis)(nil),        // 5: toc.v1.Diagnosis
+	(*ObservationBatch)(nil), // 6: toc.v1.ObservationBatch
 }
 var file_toc_v1_toc_proto_depIdxs = []int32{
 	0, // 0: toc.v1.StageDiagnosis.state:type_name -> toc.v1.StageState
-	2, // 1: toc.v1.Diagnosis.stages:type_name -> toc.v1.StageDiagnosis
-	1, // 2: toc.v1.ObservationBatch.observations:type_name -> toc.v1.StageObservation
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	4, // 1: toc.v1.Diagnosis.stages:type_name -> toc.v1.StageDiagnosis
+	1, // 2: toc.v1.Diagnosis.constraint_state:type_name -> toc.v1.ConstraintState
+	2, // 3: toc.v1.Diagnosis.constraint_source:type_name -> toc.v1.ConstraintSource
+	3, // 4: toc.v1.ObservationBatch.observations:type_name -> toc.v1.StageObservation
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_toc_v1_toc_proto_init() }
@@ -599,7 +755,7 @@ func file_toc_v1_toc_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_toc_v1_toc_proto_rawDesc), len(file_toc_v1_toc_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      3,
 			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,

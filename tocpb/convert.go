@@ -206,10 +206,42 @@ func DiagnosisToProto(d core.Diagnosis) *Diagnosis {
 		stages[i] = stageDiagnosisToProto(s)
 	}
 	return &Diagnosis{
-		Constraint:      d.Constraint,
-		Confidence:      d.Confidence,
-		Stages:          stages,
-		StarvationCount: int64(d.StarvationCount),
+		Constraint:          d.Constraint,
+		SupportFreshness:    d.SupportFreshness,
+		Stages:              stages,
+		StarvationCount:     int64(d.StarvationCount),
+		ConstraintState:     constraintStateToProto(d.ConstraintState),
+		ConstraintSource:    constraintSourceToProto(d.ConstraintSource),
+		CandidateConstraint: d.CandidateConstraint,
+		UnsupportedCount:    int32(d.UnsupportedCount),
+	}
+}
+
+func constraintStateToProto(s core.ConstraintState) ConstraintState {
+	switch s {
+	case core.ConstraintUnknown:
+		return ConstraintState_CONSTRAINT_STATE_UNKNOWN
+	case core.ConstraintUnconstrained:
+		return ConstraintState_CONSTRAINT_STATE_UNCONSTRAINED
+	case core.ConstraintAmbiguous:
+		return ConstraintState_CONSTRAINT_STATE_AMBIGUOUS
+	case core.ConstraintEmerging:
+		return ConstraintState_CONSTRAINT_STATE_EMERGING
+	case core.ConstraintIdentified:
+		return ConstraintState_CONSTRAINT_STATE_IDENTIFIED
+	default:
+		return ConstraintState_CONSTRAINT_STATE_UNSPECIFIED
+	}
+}
+
+func constraintSourceToProto(s core.ConstraintSource) ConstraintSource {
+	switch s {
+	case core.ConstraintSourceInferred:
+		return ConstraintSource_CONSTRAINT_SOURCE_INFERRED
+	case core.ConstraintSourceManualOverride:
+		return ConstraintSource_CONSTRAINT_SOURCE_MANUAL_OVERRIDE
+	default:
+		return ConstraintSource_CONSTRAINT_SOURCE_UNSPECIFIED
 	}
 }
 
@@ -221,8 +253,9 @@ func DiagnosisFromProto(pb *Diagnosis) (core.Diagnosis, error) {
 		return core.Diagnosis{}, errors.New("tocpb: nil Diagnosis")
 	}
 
-	if !isFinite(pb.GetConfidence()) || pb.GetConfidence() < 0 || pb.GetConfidence() > 1 {
-		return core.Diagnosis{}, fmt.Errorf("tocpb: confidence %v out of [0,1]", pb.GetConfidence())
+	sf := pb.GetSupportFreshness()
+	if !isFinite(sf) || sf < 0 || sf > 1 {
+		return core.Diagnosis{}, fmt.Errorf("tocpb: support_freshness %v out of [0,1]", sf)
 	}
 	if pb.GetStarvationCount() < 0 {
 		return core.Diagnosis{}, fmt.Errorf("tocpb: negative starvation_count (%d)", pb.GetStarvationCount())
@@ -250,12 +283,63 @@ func DiagnosisFromProto(pb *Diagnosis) (core.Diagnosis, error) {
 		return core.Diagnosis{}, fmt.Errorf("tocpb: constraint %q not found in stages", c)
 	}
 
+	// Derive ConstraintState: explicit field or backward compat.
+	cs := constraintStateFromProto(pb.GetConstraintState())
+	csrc := constraintSourceFromProto(pb.GetConstraintSource())
+
+	// Backward compat: UNSPECIFIED state → infer from string fields.
+	if cs == core.ConstraintUnspecified {
+		switch {
+		case pb.GetConstraint() != "":
+			cs = core.ConstraintIdentified
+			if csrc == core.ConstraintSourceUnspecified {
+				csrc = core.ConstraintSourceInferred
+			}
+		case pb.GetCandidateConstraint() != "":
+			cs = core.ConstraintEmerging
+		default:
+			cs = core.ConstraintUnknown
+		}
+	}
+
 	return core.Diagnosis{
-		Constraint:      pb.GetConstraint(),
-		Confidence:      pb.GetConfidence(),
-		Stages:          stages,
-		StarvationCount: int(pb.GetStarvationCount()),
+		ConstraintState:     cs,
+		ConstraintSource:    csrc,
+		Constraint:          pb.GetConstraint(),
+		CandidateConstraint: pb.GetCandidateConstraint(),
+		SupportFreshness:    sf,
+		UnsupportedCount:    int(pb.GetUnsupportedCount()),
+		Stages:              stages,
+		StarvationCount:     int(pb.GetStarvationCount()),
 	}, nil
+}
+
+func constraintStateFromProto(s ConstraintState) core.ConstraintState {
+	switch s {
+	case ConstraintState_CONSTRAINT_STATE_UNKNOWN:
+		return core.ConstraintUnknown
+	case ConstraintState_CONSTRAINT_STATE_UNCONSTRAINED:
+		return core.ConstraintUnconstrained
+	case ConstraintState_CONSTRAINT_STATE_AMBIGUOUS:
+		return core.ConstraintAmbiguous
+	case ConstraintState_CONSTRAINT_STATE_EMERGING:
+		return core.ConstraintEmerging
+	case ConstraintState_CONSTRAINT_STATE_IDENTIFIED:
+		return core.ConstraintIdentified
+	default:
+		return core.ConstraintUnspecified
+	}
+}
+
+func constraintSourceFromProto(s ConstraintSource) core.ConstraintSource {
+	switch s {
+	case ConstraintSource_CONSTRAINT_SOURCE_INFERRED:
+		return core.ConstraintSourceInferred
+	case ConstraintSource_CONSTRAINT_SOURCE_MANUAL_OVERRIDE:
+		return core.ConstraintSourceManualOverride
+	default:
+		return core.ConstraintSourceUnspecified
+	}
 }
 
 // Explicit enum mapping — decouples Go iota order from wire numbers.

@@ -94,7 +94,7 @@ func sampleDiagnosis() toc.DiagnosisMessage {
 		TimestampUnixNano: 2000000000,
 		Diagnosis: core.Diagnosis{
 			Constraint: "parse",
-			Confidence: 0.95,
+			SupportFreshness: 0.95,
 			Stages: []core.StageDiagnosis{
 				{
 					Stage:       "parse",
@@ -206,8 +206,8 @@ func TestDiagnosisRoundTrip(t *testing.T) {
 	if received.Diagnosis.Constraint != "parse" {
 		t.Errorf("constraint: got %q want %q", received.Diagnosis.Constraint, "parse")
 	}
-	if received.Diagnosis.Confidence != 0.95 {
-		t.Errorf("confidence: got %f want %f", received.Diagnosis.Confidence, 0.95)
+	if received.Diagnosis.SupportFreshness != 0.95 {
+		t.Errorf("confidence: got %f want %f", received.Diagnosis.SupportFreshness, 0.95)
 	}
 
 	mu.Lock()

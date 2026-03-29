@@ -222,7 +222,7 @@ func TestObservationFromProtoNegativeCounts(t *testing.T) {
 func TestDiagnosisRoundTrip(t *testing.T) {
 	orig := core.Diagnosis{
 		Constraint: "embed",
-		Confidence: 0.92,
+		SupportFreshness: 0.92,
 		Stages: []core.StageDiagnosis{
 			{
 				Stage: "parse", State: core.StateStarved,
@@ -244,7 +244,7 @@ func TestDiagnosisRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Constraint != orig.Constraint || got.Confidence != orig.Confidence || got.StarvationCount != orig.StarvationCount {
+	if got.Constraint != orig.Constraint || got.SupportFreshness != orig.SupportFreshness || got.StarvationCount != orig.StarvationCount {
 		t.Errorf("top-level mismatch:\ngot  %+v\nwant %+v", got, orig)
 	}
 	if len(got.Stages) != len(orig.Stages) {
@@ -259,7 +259,7 @@ func TestDiagnosisRoundTrip(t *testing.T) {
 
 func TestDiagnosisOptionalRatioPresence(t *testing.T) {
 	orig := core.Diagnosis{
-		Confidence: 0.5,
+		SupportFreshness: 0.5,
 		Stages:     []core.StageDiagnosis{{Stage: "a", Utilization: 0.5}},
 	}
 	pb := tocpb.DiagnosisToProto(orig)
@@ -277,7 +277,7 @@ func TestDiagnosisOptionalRatioPresence(t *testing.T) {
 
 func TestDiagnosisWireSurvival(t *testing.T) {
 	orig := core.Diagnosis{
-		Constraint: "store", Confidence: 0.85,
+		Constraint: "store", SupportFreshness: 0.85,
 		Stages: []core.StageDiagnosis{{Stage: "store", State: core.StateSaturated, Utilization: 0.9}},
 	}
 	pb := tocpb.DiagnosisToProto(orig)
@@ -293,7 +293,7 @@ func TestDiagnosisWireSurvival(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Constraint != orig.Constraint || got.Confidence != orig.Confidence {
+	if got.Constraint != orig.Constraint || got.SupportFreshness != orig.SupportFreshness {
 		t.Errorf("wire round-trip mismatch")
 	}
 }
@@ -307,16 +307,16 @@ func TestDiagnosisFromProtoNil(t *testing.T) {
 	}
 }
 
-func TestDiagnosisFromProtoNaNConfidence(t *testing.T) {
-	pb := &tocpb.Diagnosis{Confidence: math.NaN()}
+func TestDiagnosisFromProtoNaNSupportFreshness(t *testing.T) {
+	pb := &tocpb.Diagnosis{SupportFreshness: math.NaN()}
 	_, err := tocpb.DiagnosisFromProto(pb)
 	if err == nil {
 		t.Error("expected error for NaN confidence")
 	}
 }
 
-func TestDiagnosisFromProtoConfidenceOutOfRange(t *testing.T) {
-	pb := &tocpb.Diagnosis{Confidence: 1.5}
+func TestDiagnosisFromProtoSupportFreshnessOutOfRange(t *testing.T) {
+	pb := &tocpb.Diagnosis{SupportFreshness: 1.5}
 	_, err := tocpb.DiagnosisFromProto(pb)
 	if err == nil {
 		t.Error("expected error for confidence > 1")
@@ -324,7 +324,7 @@ func TestDiagnosisFromProtoConfidenceOutOfRange(t *testing.T) {
 }
 
 func TestDiagnosisFromProtoNegativeStarvationCount(t *testing.T) {
-	pb := &tocpb.Diagnosis{Confidence: 0.5, StarvationCount: -1}
+	pb := &tocpb.Diagnosis{SupportFreshness: 0.5, StarvationCount: -1}
 	_, err := tocpb.DiagnosisFromProto(pb)
 	if err == nil {
 		t.Error("expected error for negative starvation_count")
@@ -333,7 +333,7 @@ func TestDiagnosisFromProtoNegativeStarvationCount(t *testing.T) {
 
 func TestDiagnosisFromProtoDuplicateStageNames(t *testing.T) {
 	pb := &tocpb.Diagnosis{
-		Confidence: 0.5,
+		SupportFreshness: 0.5,
 		Stages: []*tocpb.StageDiagnosis{
 			{Stage: "a"},
 			{Stage: "a"},
@@ -348,7 +348,7 @@ func TestDiagnosisFromProtoDuplicateStageNames(t *testing.T) {
 func TestDiagnosisFromProtoConstraintNotInStages(t *testing.T) {
 	pb := &tocpb.Diagnosis{
 		Constraint: "missing",
-		Confidence: 0.5,
+		SupportFreshness: 0.5,
 		Stages:     []*tocpb.StageDiagnosis{{Stage: "a"}},
 	}
 	_, err := tocpb.DiagnosisFromProto(pb)
@@ -359,7 +359,7 @@ func TestDiagnosisFromProtoConstraintNotInStages(t *testing.T) {
 
 func TestDiagnosisFromProtoEmptyConstraintAllowed(t *testing.T) {
 	pb := &tocpb.Diagnosis{
-		Confidence: 0.5,
+		SupportFreshness: 0.5,
 		Stages:     []*tocpb.StageDiagnosis{{Stage: "a"}},
 	}
 	_, err := tocpb.DiagnosisFromProto(pb)
@@ -375,28 +375,28 @@ func TestStageDiagnosisFromProtoInvalidValues(t *testing.T) {
 		name string
 		pb   *tocpb.Diagnosis
 	}{
-		{"Inf utilization", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Utilization: math.Inf(1)}}}},
-		{"NaN error_rate", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", ErrorRate: math.NaN()}}}},
-		{"utilization > 1", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Utilization: 1.5}}}},
-		{"negative utilization", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Utilization: -0.1}}}},
-		{"error_rate > 1", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", ErrorRate: 2.0}}}},
+		{"Inf utilization", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Utilization: math.Inf(1)}}}},
+		{"NaN error_rate", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", ErrorRate: math.NaN()}}}},
+		{"utilization > 1", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Utilization: 1.5}}}},
+		{"negative utilization", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Utilization: -0.1}}}},
+		{"error_rate > 1", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", ErrorRate: 2.0}}}},
 		{"NaN idle_ratio", func() *tocpb.Diagnosis {
 			v := math.NaN()
-			return &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", IdleRatio: &v}}}
+			return &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", IdleRatio: &v}}}
 		}()},
 		{"Inf blocked_ratio", func() *tocpb.Diagnosis {
 			v := math.Inf(1)
-			return &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", BlockedRatio: &v}}}
+			return &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", BlockedRatio: &v}}}
 		}()},
 		{"negative idle_ratio", func() *tocpb.Diagnosis {
 			v := -0.1
-			return &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", IdleRatio: &v}}}
+			return &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", IdleRatio: &v}}}
 		}()},
-		{"empty stage name", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: ""}}}},
-		{"failures > completions", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Failures: 10, Completions: 5}}}},
-		{"negative completions", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Completions: -1}}}},
-		{"negative failures", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Failures: -1}}}},
-		{"negative arrivals", &tocpb.Diagnosis{Confidence: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Arrivals: -1}}}},
+		{"empty stage name", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: ""}}}},
+		{"failures > completions", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Failures: 10, Completions: 5}}}},
+		{"negative completions", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Completions: -1}}}},
+		{"negative failures", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Failures: -1}}}},
+		{"negative arrivals", &tocpb.Diagnosis{SupportFreshness: 0.5, Stages: []*tocpb.StageDiagnosis{{Stage: "a", Arrivals: -1}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -425,7 +425,7 @@ func TestStageStateEnumMapping(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			orig := core.Diagnosis{Confidence: 0.5, Stages: []core.StageDiagnosis{{Stage: "s", State: tt.core}}}
+			orig := core.Diagnosis{SupportFreshness: 0.5, Stages: []core.StageDiagnosis{{Stage: "s", State: tt.core}}}
 			pb := tocpb.DiagnosisToProto(orig)
 			if pb.Stages[0].State != tt.proto {
 				t.Errorf("ToProto: got %v, want %v", pb.Stages[0].State, tt.proto)
@@ -443,7 +443,7 @@ func TestStageStateEnumMapping(t *testing.T) {
 
 func TestUnknownEnumValueMapsToUnknown(t *testing.T) {
 	pb := &tocpb.Diagnosis{
-		Confidence: 0.5,
+		SupportFreshness: 0.5,
 		Stages:     []*tocpb.StageDiagnosis{{Stage: "s", State: tocpb.StageState(99)}},
 	}
 	got, err := tocpb.DiagnosisFromProto(pb)

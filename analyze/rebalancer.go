@@ -14,8 +14,7 @@ import (
 
 const (
 	defaultCooldownIntervals = 3
-	confidenceThreshold      = 0.5
-	revertRegressionMargin   = 0.9 // revert if throughput < 90% of pre-move
+	revertRegressionMargin = 0.9 // revert if throughput < 90% of pre-move
 )
 
 // WorkerPolicy constrains how the rebalancer treats a stage.
@@ -193,7 +192,7 @@ func (r *Rebalancer) tick() {
 	if diag == nil {
 		return
 	}
-	if diag.Constraint == "" || diag.Confidence < confidenceThreshold {
+	if diag.ConstraintState != core.ConstraintIdentified {
 		return
 	}
 
@@ -288,7 +287,7 @@ func (r *Rebalancer) tick() {
 	r.logger.Printf("[rebalancer] moved: %s %d→%d, %s %d→%d (constraint=%s, conf=%.2f)",
 		donor.Name, donorStats.ActiveWorkers, donorApplied,
 		receiver.Name, receiverStats.ActiveWorkers, receiverApplied,
-		diag.Constraint, diag.Confidence)
+		diag.Constraint, diag.SupportFreshness)
 }
 
 func (r *Rebalancer) checkRevert() {

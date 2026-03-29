@@ -100,7 +100,7 @@ func TestObserverWithDiagnosis(t *testing.T) {
 
 	diag := &core.Diagnosis{
 		Constraint: "embed",
-		Confidence: 0.9,
+		SupportFreshness: 0.9,
 		Stages: []core.StageDiagnosis{
 			{Stage: "embed", State: core.StateSaturated, Utilization: 0.95},
 		},

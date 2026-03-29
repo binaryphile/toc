@@ -11,6 +11,7 @@ var DefaultThresholds = Thresholds{
 	SaturatedIdle:     0.3,
 	SaturatedBlock:    0.2,
 	HysteresisWindows: 3,
+	DemotionWindows:   3,
 	ConfidenceMin:     10,
 }
 
@@ -22,7 +23,8 @@ type Thresholds struct {
 	SaturatedBusy     float64 // utilization above this → Saturated candidate
 	SaturatedIdle     float64 // idle must be below this for Saturated
 	SaturatedBlock    float64 // blocked must be below this for Saturated
-	HysteresisWindows int     // consecutive windows before constraint confirmed
+	HysteresisWindows int     // consecutive windows before challenger promotes; >= 1
+	DemotionWindows   int     // consecutive unsupported windows before incumbent demotes; >= 1
 	ConfidenceMin     int64   // minimum completions for confident classification
 }
 
@@ -35,8 +37,8 @@ func WithThresholds(t Thresholds) Option {
 }
 
 // WithDrum sets a manual constraint override. Bypasses automatic
-// identification — the analyzer will report this stage with
-// confidence 1.0 on every Step.
+// identification — the analyzer will report this stage as Identified
+// with [ConstraintSourceManualOverride] on every Step.
 func WithDrum(name string) Option {
 	return func(a *Analyzer) { a.drum = name }
 }
@@ -44,20 +46,34 @@ func WithDrum(name string) Option {
 // Analyzer is the deterministic constraint identifier. No goroutines,
 // no time.Now(), no channels. Same inputs → same outputs.
 //
+// Internally tracks an incumbent (confirmed constraint) and a
+// challenger (candidate building toward promotion). Promotion
+// requires [Thresholds.HysteresisWindows] consecutive windows as
+// sole top saturated stage. Demotion requires
+// [Thresholds.DemotionWindows] consecutive unsupported windows.
+//
 // Call [Analyzer.Step] once per analysis window with observations for
 // all stages. The analyzer maintains hysteresis state between calls.
 type Analyzer struct {
-	thresholds Thresholds
-
-	// State mutated by Step only.
+	thresholds     Thresholds
 	prevQueueDepth map[string]int64
-	candidate      string
-	consecutiveN   int
-	starvationN    int
-	drum           string
+	drum           string // manual override
+	prevDrum       string // edge detection for override transitions
+
+	// Incumbent: confirmed constraint.
+	incumbent    string
+	unsupportedN int // consecutive windows incumbent is NOT top
+	supportN     int // consecutive windows incumbent IS top (freshness)
+
+	// Challenger: replacement candidate (never == incumbent while tracking).
+	challenger  string
+	challengerN int // consecutive windows as sole top
+
+	starvationN int
 }
 
 // NewAnalyzer creates a deterministic constraint analyzer.
+// Panics if HysteresisWindows < 1 or DemotionWindows < 1.
 func NewAnalyzer(opts ...Option) *Analyzer {
 	a := &Analyzer{
 		thresholds:     DefaultThresholds,
@@ -65,6 +81,12 @@ func NewAnalyzer(opts ...Option) *Analyzer {
 	}
 	for _, opt := range opts {
 		opt(a)
+	}
+	if a.thresholds.HysteresisWindows < 1 {
+		panic("core.NewAnalyzer: HysteresisWindows must be >= 1")
+	}
+	if a.thresholds.DemotionWindows < 1 {
+		panic("core.NewAnalyzer: DemotionWindows must be >= 1")
 	}
 	return a
 }
@@ -85,6 +107,7 @@ func (a *Analyzer) Step(observations []StageObservation) Diagnosis {
 		Stages: make([]StageDiagnosis, 0, len(observations)),
 	}
 
+	// Classify stages and collect saturated candidates.
 	const tieMargin = 0.05
 
 	type candidate struct {
@@ -102,8 +125,9 @@ func (a *Analyzer) Step(observations []StageObservation) Diagnosis {
 		}
 	}
 
-	// Pick top saturated stage, detect ties.
+	// Pick sole top saturated stage. "" if tie or none.
 	topName := ""
+	tied := false
 	if len(saturated) > 0 {
 		best := saturated[0]
 		for _, c := range saturated[1:] {
@@ -111,7 +135,6 @@ func (a *Analyzer) Step(observations []StageObservation) Diagnosis {
 				best = c
 			}
 		}
-		tied := false
 		for _, c := range saturated {
 			if c.name != best.name && best.util-c.util < tieMargin {
 				tied = true
@@ -123,48 +146,138 @@ func (a *Analyzer) Step(observations []StageObservation) Diagnosis {
 		}
 	}
 
-	// Resolve constraint: manual override or hysteresis.
+	// ── Override edge detection ──
+	if a.drum != a.prevDrum {
+		if a.drum != "" {
+			// Entering override: clear challenger.
+			a.challenger = ""
+			a.challengerN = 0
+		}
+		a.prevDrum = a.drum
+	}
+
+	// ── Override active: emit and skip hysteresis ──
 	if a.drum != "" {
+		diag.ConstraintState = ConstraintIdentified
+		diag.ConstraintSource = ConstraintSourceManualOverride
 		diag.Constraint = a.drum
-		diag.Confidence = 1.0
-	} else {
-		if topName != "" && topName == a.candidate {
-			a.consecutiveN++
-		} else if topName != "" {
-			a.candidate = topName
-			a.consecutiveN = 1
-			a.starvationN = 0
-		}
+		diag.SupportFreshness = 1.0
 
-		if a.consecutiveN >= a.thresholds.HysteresisWindows && a.candidate != "" {
-			diag.Constraint = a.candidate
-			diag.Confidence = math.Min(float64(a.consecutiveN)/10.0, 1.0)
-		}
-	}
-
-	// Track constraint starvation (Step 2 violation).
-	if diag.Constraint != "" {
-		starved := false
-		for _, sd := range diag.Stages {
-			if sd.Stage == diag.Constraint && sd.State == StateStarved {
-				starved = true
-				break
-			}
-		}
-		if starved {
-			a.starvationN++
-		} else {
-			a.starvationN = 0
-		}
+		// Starvation still tracked for override target.
+		a.trackStarvation(&diag)
 		diag.StarvationCount = a.starvationN
+
+		a.updateQueueDepths(observations)
+		return diag
 	}
 
-	// Update queue depth history.
+	// ── Step 4: Update challenger (only stages != incumbent) ──
+	if topName != "" && topName != a.incumbent {
+		if topName == a.challenger {
+			a.challengerN++
+		} else {
+			a.challenger = topName
+			a.challengerN = 1
+		}
+	} else {
+		// topName == "" (tie/none) or topName == incumbent: gap for challenger.
+		a.challengerN = 0
+		// challenger name preserved for resume
+	}
+
+	// ── Step 5: Promote ──
+	if a.challenger != "" && a.challenger != a.incumbent && a.challengerN >= a.thresholds.HysteresisWindows {
+		a.incumbent = a.challenger
+		a.challenger = ""
+		a.challengerN = 0
+		a.unsupportedN = 0
+		a.supportN = a.thresholds.HysteresisWindows
+		a.starvationN = 0
+	}
+
+	// ── Step 6: Update incumbent support ──
+	if a.incumbent != "" {
+		if topName == a.incumbent {
+			a.supportN++
+			a.unsupportedN = 0
+		} else {
+			a.supportN = 0
+			a.unsupportedN++
+		}
+	}
+
+	// ── Step 7: Demote ──
+	if a.incumbent != "" && a.unsupportedN > 0 && a.unsupportedN >= a.thresholds.DemotionWindows {
+		a.incumbent = ""
+		a.unsupportedN = 0
+		a.supportN = 0
+		a.starvationN = 0
+		// challenger state preserved — replacement may already be building
+	}
+
+	// ── Step 8: Starvation tracking ──
+	a.trackStarvation(&diag)
+
+	// ── Emit diagnosis ──
+	switch {
+	case len(observations) == 0:
+		diag.ConstraintState = ConstraintUnknown
+
+	case a.incumbent != "":
+		diag.ConstraintState = ConstraintIdentified
+		diag.ConstraintSource = ConstraintSourceInferred
+		diag.Constraint = a.incumbent
+		diag.SupportFreshness = math.Min(float64(a.supportN)/10.0, 1.0)
+		diag.UnsupportedCount = a.unsupportedN
+		// Emit candidate if challenger is valid and distinct.
+		if a.challenger != "" && a.challengerN > 0 && a.challenger != a.incumbent {
+			diag.CandidateConstraint = a.challenger
+		}
+
+	case a.challenger != "" && a.challengerN > 0:
+		diag.ConstraintState = ConstraintEmerging
+		diag.CandidateConstraint = a.challenger
+
+	case tied:
+		diag.ConstraintState = ConstraintAmbiguous
+
+	default:
+		diag.ConstraintState = ConstraintUnconstrained
+	}
+
+	diag.StarvationCount = a.starvationN
+
+	a.updateQueueDepths(observations)
+	return diag
+}
+
+func (a *Analyzer) trackStarvation(diag *Diagnosis) {
+	if a.incumbent == "" && a.drum == "" {
+		return
+	}
+	target := a.incumbent
+	if a.drum != "" {
+		target = a.drum
+	}
+
+	starved := false
+	for _, sd := range diag.Stages {
+		if sd.Stage == target && sd.State == StateStarved {
+			starved = true
+			break
+		}
+	}
+	if starved {
+		a.starvationN++
+	} else {
+		a.starvationN = 0
+	}
+}
+
+func (a *Analyzer) updateQueueDepths(observations []StageObservation) {
 	for _, obs := range observations {
 		a.prevQueueDepth[obs.Stage] = obs.QueueDepth
 	}
-
-	return diag
 }
 
 func (a *Analyzer) classifyStage(obs StageObservation) StageDiagnosis {

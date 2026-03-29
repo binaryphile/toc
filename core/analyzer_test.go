@@ -94,8 +94,8 @@ func TestHysteresis(t *testing.T) {
 	if diag.Constraint != "embed" {
 		t.Errorf("window 3: constraint = %q, want embed", diag.Constraint)
 	}
-	if diag.Confidence <= 0 {
-		t.Errorf("window 3: confidence = %f, want > 0", diag.Confidence)
+	if diag.SupportFreshness <= 0 {
+		t.Errorf("window 3: confidence = %f, want > 0", diag.SupportFreshness)
 	}
 }
 
@@ -135,8 +135,8 @@ func TestManualDrum(t *testing.T) {
 	if diag.Constraint != "embed" {
 		t.Errorf("constraint = %q, want embed (manual)", diag.Constraint)
 	}
-	if diag.Confidence != 1.0 {
-		t.Errorf("confidence = %f, want 1.0", diag.Confidence)
+	if diag.SupportFreshness != 1.0 {
+		t.Errorf("confidence = %f, want 1.0", diag.SupportFreshness)
 	}
 }
 
@@ -282,6 +282,266 @@ func TestStageStateString(t *testing.T) {
 	for _, tt := range tests {
 		if got := tt.state.String(); got != tt.want {
 			t.Errorf("%v.String() = %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
+// ── State machine sequence tests ────────────────────────────────────────
+
+// topObs builds observations where the given stage is saturated (sole top)
+// and all other known stages are healthy. "" means no stages are saturated.
+// "tie:A,B" means A and B are both saturated at near-equal utilization.
+func topObs(top string, stages ...string) []core.StageObservation {
+	var result []core.StageObservation
+	for _, name := range stages {
+		if name == top {
+			result = append(result, obs(name, 800, 100, 50, 1000, 100, 0, 0))
+		} else {
+			result = append(result, obs(name, 400, 400, 100, 1000, 100, 0, 0))
+		}
+	}
+	return result
+}
+
+func tieObs(a, b string, stages ...string) []core.StageObservation {
+	var result []core.StageObservation
+	for _, name := range stages {
+		if name == a || name == b {
+			// Both at 80%, within tieMargin (0.05)
+			result = append(result, obs(name, 800, 100, 50, 1000, 100, 0, 0))
+		} else {
+			result = append(result, obs(name, 400, 400, 100, 1000, 100, 0, 0))
+		}
+	}
+	return result
+}
+
+// assertInvariants checks Diagnosis structural invariants after every step.
+func assertInvariants(t *testing.T, step int, d core.Diagnosis) {
+	t.Helper()
+	if !d.Valid() {
+		t.Errorf("step %d: Diagnosis.Valid() = false: state=%s src=%s constraint=%q candidate=%q fresh=%.2f unsup=%d",
+			step, d.ConstraintState, d.ConstraintSource, d.Constraint, d.CandidateConstraint,
+			d.SupportFreshness, d.UnsupportedCount)
+	}
+}
+
+type expectation struct {
+	state     core.ConstraintState
+	constraint string
+	candidate  string
+}
+
+func TestStateMachineSequences(t *testing.T) {
+	stages := []string{"A", "B", "C"}
+
+	tests := []struct {
+		name    string
+		steps   []func() []core.StageObservation // observation generator per step
+		expects []expectation
+	}{
+		{
+			name: "promotion_3_consecutive",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintIdentified, "A", ""},
+			},
+		},
+		{
+			name: "gap_breaks_promotion",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("", stages...) }, // gap
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintUnconstrained, "", ""},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintIdentified, "A", ""},
+			},
+		},
+		{
+			name: "displacement_during_emergence",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("B", stages...) },
+				func() []core.StageObservation { return topObs("B", stages...) },
+				func() []core.StageObservation { return topObs("B", stages...) },
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "B"},
+				{core.ConstraintEmerging, "", "B"},
+				{core.ConstraintIdentified, "B", ""},
+			},
+		},
+		{
+			name: "demotion_after_gaps",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) }, // promote
+				func() []core.StageObservation { return topObs("", stages...) }, // unsup 1
+				func() []core.StageObservation { return topObs("", stages...) }, // unsup 2
+				func() []core.StageObservation { return topObs("", stages...) }, // unsup 3 → demote
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintUnconstrained, "", ""},
+			},
+		},
+		{
+			name: "noisy_displacement_incumbent_survives",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) }, // promote
+				func() []core.StageObservation { return topObs("B", stages...) }, // B takes top 1 window
+				func() []core.StageObservation { return topObs("A", stages...) }, // A back
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintIdentified, "A", "B"}, // incumbent A, challenger B
+				{core.ConstraintIdentified, "A", ""},   // A back as top
+			},
+		},
+		{
+			name: "challenger_promotes_over_incumbent",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) }, // promote A
+				func() []core.StageObservation { return topObs("B", stages...) },
+				func() []core.StageObservation { return topObs("B", stages...) },
+				func() []core.StageObservation { return topObs("B", stages...) }, // B promotes
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintIdentified, "A", "B"},
+				{core.ConstraintIdentified, "A", "B"},
+				{core.ConstraintIdentified, "B", ""},
+			},
+		},
+		{
+			name: "ties_demote_incumbent",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) }, // promote
+				func() []core.StageObservation { return tieObs("A", "B", stages...) }, // tie unsup 1
+				func() []core.StageObservation { return tieObs("A", "B", stages...) }, // unsup 2
+				func() []core.StageObservation { return tieObs("A", "B", stages...) }, // unsup 3 → demote
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintIdentified, "A", ""},
+				{core.ConstraintAmbiguous, "", ""},
+			},
+		},
+		{
+			name: "alternation_neither_promotes",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("B", stages...) },
+				func() []core.StageObservation { return topObs("A", stages...) },
+				func() []core.StageObservation { return topObs("B", stages...) },
+			},
+			expects: []expectation{
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "B"},
+				{core.ConstraintEmerging, "", "A"},
+				{core.ConstraintEmerging, "", "B"},
+			},
+		},
+		{
+			name: "empty_observations",
+			steps: []func() []core.StageObservation{
+				func() []core.StageObservation { return nil },
+			},
+			expects: []expectation{
+				{core.ConstraintUnknown, "", ""},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := core.NewAnalyzer()
+			for i, stepFn := range tt.steps {
+				diag := a.Step(stepFn())
+				assertInvariants(t, i, diag)
+
+				exp := tt.expects[i]
+				if diag.ConstraintState != exp.state {
+					t.Errorf("step %d: state = %s, want %s", i, diag.ConstraintState, exp.state)
+				}
+				if diag.Constraint != exp.constraint {
+					t.Errorf("step %d: constraint = %q, want %q", i, diag.Constraint, exp.constraint)
+				}
+				if diag.CandidateConstraint != exp.candidate {
+					t.Errorf("step %d: candidate = %q, want %q", i, diag.CandidateConstraint, exp.candidate)
+				}
+			}
+		})
+	}
+}
+
+func TestConstraintStateString(t *testing.T) {
+	tests := []struct {
+		state core.ConstraintState
+		want  string
+	}{
+		{core.ConstraintUnspecified, "unspecified"},
+		{core.ConstraintUnknown, "unknown"},
+		{core.ConstraintUnconstrained, "unconstrained"},
+		{core.ConstraintAmbiguous, "ambiguous"},
+		{core.ConstraintEmerging, "emerging"},
+		{core.ConstraintIdentified, "identified"},
+	}
+	for _, tt := range tests {
+		if got := tt.state.String(); got != tt.want {
+			t.Errorf("%v.String() = %q, want %q", tt.state, got, tt.want)
+		}
+	}
+}
+
+func TestConstraintSourceString(t *testing.T) {
+	tests := []struct {
+		src  core.ConstraintSource
+		want string
+	}{
+		{core.ConstraintSourceUnspecified, "unspecified"},
+		{core.ConstraintSourceInferred, "inferred"},
+		{core.ConstraintSourceManualOverride, "manual_override"},
+	}
+	for _, tt := range tests {
+		if got := tt.src.String(); got != tt.want {
+			t.Errorf("%v.String() = %q, want %q", tt.src, got, tt.want)
 		}
 	}
 }

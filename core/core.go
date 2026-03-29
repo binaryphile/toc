@@ -104,13 +104,104 @@ func (s StageState) String() string {
 	}
 }
 
+// ConstraintState classifies the analyzer's current constraint determination.
+type ConstraintState int
+
+const (
+	ConstraintUnspecified    ConstraintState = iota // zero value / proto default
+	ConstraintUnknown                               // no usable diagnosis signal
+	ConstraintUnconstrained                         // stages observed, none saturated
+	ConstraintAmbiguous                             // tie among saturated candidates
+	ConstraintEmerging                              // challenger building hysteresis
+	ConstraintIdentified                            // incumbent confirmed
+)
+
+func (s ConstraintState) String() string {
+	switch s {
+	case ConstraintUnspecified:
+		return "unspecified"
+	case ConstraintUnknown:
+		return "unknown"
+	case ConstraintUnconstrained:
+		return "unconstrained"
+	case ConstraintAmbiguous:
+		return "ambiguous"
+	case ConstraintEmerging:
+		return "emerging"
+	case ConstraintIdentified:
+		return "identified"
+	default:
+		return fmt.Sprintf("ConstraintState(%d)", int(s))
+	}
+}
+
+// ConstraintSource identifies how the constraint was determined.
+type ConstraintSource int
+
+const (
+	ConstraintSourceUnspecified    ConstraintSource = iota // non-Identified states
+	ConstraintSourceInferred                               // analyzer determined from evidence
+	ConstraintSourceManualOverride                         // set by WithDrum / SetDrum
+)
+
+func (s ConstraintSource) String() string {
+	switch s {
+	case ConstraintSourceUnspecified:
+		return "unspecified"
+	case ConstraintSourceInferred:
+		return "inferred"
+	case ConstraintSourceManualOverride:
+		return "manual_override"
+	default:
+		return fmt.Sprintf("ConstraintSource(%d)", int(s))
+	}
+}
+
 // Diagnosis is the output of one [Analyzer.Step] call. Contains
 // per-stage classification and constraint identity.
 type Diagnosis struct {
-	Constraint      string           // empty if none identified
-	Confidence      float64          // 0.0-1.0
-	Stages          []StageDiagnosis // ordered by input order
-	StarvationCount int              // consecutive windows constraint was starved
+	ConstraintState     ConstraintState  // why the constraint is or isn't identified
+	ConstraintSource    ConstraintSource // how it was determined (only set for Identified)
+	Constraint          string           // incumbent stage name when Identified; empty otherwise
+	CandidateConstraint string           // challenger stage name when Emerging; empty otherwise
+	SupportFreshness    float64          // incumbent support streak: supportN/10, [0,1]; 0 when not identified
+	UnsupportedCount    int              // incumbent staleness; 0 when supported or not identified
+	Stages              []StageDiagnosis // ordered by input order
+	StarvationCount     int              // consecutive windows incumbent was starved
+}
+
+// Valid checks structural invariants.
+func (d Diagnosis) Valid() bool {
+	switch d.ConstraintState {
+	case ConstraintIdentified:
+		if d.Constraint == "" || d.ConstraintSource == ConstraintSourceUnspecified {
+			return false
+		}
+		// CandidateConstraint may be set (challenger building while incumbent exists)
+	case ConstraintEmerging:
+		if d.CandidateConstraint == "" || d.Constraint != "" {
+			return false
+		}
+	default:
+		if d.Constraint != "" || d.CandidateConstraint != "" {
+			return false
+		}
+	}
+	if d.ConstraintState != ConstraintIdentified {
+		if d.ConstraintSource != ConstraintSourceUnspecified {
+			return false
+		}
+		if d.SupportFreshness != 0 {
+			return false
+		}
+	}
+	if d.CandidateConstraint != "" && d.CandidateConstraint == d.Constraint {
+		return false
+	}
+	if d.UnsupportedCount > 0 && d.ConstraintState != ConstraintIdentified {
+		return false
+	}
+	return true
 }
 
 // StageDiagnosis holds the classification for one stage.

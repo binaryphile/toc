@@ -47,9 +47,11 @@ func (m *mockStage) control(policy WorkerPolicy) StageControl {
 
 func diagnosisWithConstraint(constraintName string, stages []string) func() *core.Diagnosis {
 	diag := &core.Diagnosis{
-		Constraint: constraintName,
-		Confidence: 0.8,
-		Stages:     make([]core.StageDiagnosis, len(stages)),
+		ConstraintState:  core.ConstraintIdentified,
+		ConstraintSource: core.ConstraintSourceInferred,
+		Constraint:       constraintName,
+		SupportFreshness: 0.8,
+		Stages:           make([]core.StageDiagnosis, len(stages)),
 	}
 	for i, name := range stages {
 		util := 0.3
