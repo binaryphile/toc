@@ -1,6 +1,6 @@
-// Command gridsearch evaluates all static WIP vectors on a multi-stage
-// DES pipeline. Reports which vectors produce the best steady-state
-// reward and whether the optimal policy shows DBR structure.
+// Command gridsearch evaluates all static DBR action pairs (rope × buffer time)
+// on a multi-stage DES pipeline. Reports which pairs produce the best
+// steady-state reward.
 package main
 
 import (
@@ -22,7 +22,9 @@ func main() {
 	maxTime := flag.Float64("max-time", 5000, "sim-time per episode")
 	alpha := flag.Float64("alpha", 0.01, "WIP penalty coefficient")
 	csvFile := flag.String("csv", "", "CSV output file (all results)")
-	maxWIP := flag.Int("max-wip", 20, "max WIP per stage")
+	maxRope := flag.Int("max-rope", 20, "max rope rate")
+	bufSteps := flag.Int("buf-steps", 20, "number of buffer time steps to evaluate")
+	constraint := flag.Int("constraint", 1, "constraint stage index")
 	interval := flag.Float64("interval", 100.0, "sim-time per step")
 	flag.Parse()
 
@@ -32,11 +34,19 @@ func main() {
 			{Workers: 1, ServiceMean: 10.0}, // bottleneck
 			{Workers: 1, ServiceMean: 1.0},
 		},
-		ArrivalMean:  11.1, // ρ ≈ 0.9 at bottleneck
-		IntervalTime: *interval,
-		MaxTime:      *maxTime,
-		RewardAlpha:  *alpha,
+		ArrivalMean:     11.1, // ρ ≈ 0.9 at bottleneck
+		IntervalTime:    *interval,
+		MaxTime:         *maxTime,
+		RewardAlpha:     *alpha,
+		ConstraintStage: *constraint,
+		MaxRopeRate:     *maxRope,
 	}
+
+	// Buffer time steps: [1×serviceMean, 2×serviceMean, ..., N×serviceMean].
+	// Each step = one item's worth of constraint time.
+	constraintMean := cfg.Stages[cfg.ConstraintStage].ServiceMean
+	maxBufTime := float64(*bufSteps) * constraintMean
+	cfg.MaxBufferTime = maxBufTime
 
 	seedList := make([]uint64, *seeds)
 	for i := range seedList {
@@ -44,38 +54,39 @@ func main() {
 	}
 
 	type result struct {
-		w0, w1, w2 int
-		mean       float64
-		stddev     float64
-		perSeed    []float64
+		rope    int
+		bufTime float64
+		bufN    int // buffer in units of constraint service times
+		mean    float64
+		stddev  float64
+		perSeed []float64
 	}
 
-	total := *maxWIP * *maxWIP * *maxWIP
+	total := *maxRope * *bufSteps
 	results := make([]result, 0, total)
 
 	start := time.Now()
 	done := 0
 
-	for w0 := 1; w0 <= *maxWIP; w0++ {
-		for w1 := 1; w1 <= *maxWIP; w1++ {
-			for w2 := 1; w2 <= *maxWIP; w2++ {
-				actions := []int{w0, w1, w2}
-				perSeed := make([]float64, len(seedList))
+	for rope := 1; rope <= *maxRope; rope++ {
+		for bn := 1; bn <= *bufSteps; bn++ {
+			bufTime := float64(bn) * constraintMean
+			action := sim.DBRAction{RopeRate: rope, BufferTime: bufTime}
+			perSeed := make([]float64, len(seedList))
 
-				for si, seed := range seedList {
-					perSeed[si] = evaluateStatic(cfg, actions, seed, *warmup)
-				}
+			for si, seed := range seedList {
+				perSeed[si] = evaluateStatic(cfg, action, seed, *warmup)
+			}
 
-				mean, std := meanStddev(perSeed)
-				results = append(results, result{w0, w1, w2, mean, std, perSeed})
+			mean, std := meanStddev(perSeed)
+			results = append(results, result{rope, bufTime, bn, mean, std, perSeed})
 
-				done++
-				if done%1000 == 0 {
-					elapsed := time.Since(start)
-					pct := float64(done) / float64(total) * 100
-					eta := time.Duration(float64(elapsed) / float64(done) * float64(total-done))
-					fmt.Fprintf(os.Stderr, "  %d/%d (%.0f%%) elapsed=%s eta=%s\n", done, total, pct, elapsed.Round(time.Second), eta.Round(time.Second))
-				}
+			done++
+			if done%100 == 0 {
+				elapsed := time.Since(start)
+				pct := float64(done) / float64(total) * 100
+				eta := time.Duration(float64(elapsed) / float64(done) * float64(total-done))
+				fmt.Fprintf(os.Stderr, "  %d/%d (%.0f%%) elapsed=%s eta=%s\n", done, total, pct, elapsed.Round(time.Second), eta.Round(time.Second))
 			}
 		}
 	}
@@ -87,14 +98,16 @@ func main() {
 	fmt.Println("\n=== TOP 10 ===")
 	for i := 0; i < 10 && i < len(results); i++ {
 		r := results[i]
-		fmt.Printf("  WIP=[%2d,%2d,%2d]  reward=%.4f ± %.4f\n", r.w0, r.w1, r.w2, r.mean, r.stddev)
+		fmt.Printf("  rope=%2d buf=%2d×svc(%.0f)  reward=%.4f ± %.4f\n",
+			r.rope, r.bufN, r.bufTime, r.mean, r.stddev)
 	}
 
 	// Print bottom 5.
 	fmt.Println("\n=== BOTTOM 5 ===")
 	for i := len(results) - 5; i < len(results); i++ {
 		r := results[i]
-		fmt.Printf("  WIP=[%2d,%2d,%2d]  reward=%.4f ± %.4f\n", r.w0, r.w1, r.w2, r.mean, r.stddev)
+		fmt.Printf("  rope=%2d buf=%2d×svc(%.0f)  reward=%.4f ± %.4f\n",
+			r.rope, r.bufN, r.bufTime, r.mean, r.stddev)
 	}
 
 	// Top equivalence set (within 1 stderr of best).
@@ -108,36 +121,53 @@ func main() {
 		}
 	}
 	fmt.Printf("\n=== EQUIVALENCE SET (within 1 stderr of best) ===\n")
-	fmt.Printf("  Best: WIP=[%d,%d,%d] reward=%.4f\n", best.w0, best.w1, best.w2, best.mean)
+	fmt.Printf("  Best: rope=%d buf=%d×svc(%.0f) reward=%.4f\n",
+		best.rope, best.bufN, best.bufTime, best.mean)
 	fmt.Printf("  Threshold: %.4f (%d vectors)\n", threshold, equivCount)
 
-	// Marginal sensitivity: best reward for each value of w1 (fix w0, w2 at best).
-	fmt.Println("\n=== MARGINAL SENSITIVITY: w1 (bottleneck WIP) ===")
-	fmt.Println("  (fixing w0, w2 at best values)")
-	for w1 := 1; w1 <= *maxWIP; w1++ {
+	// Marginal sensitivity: rope (fixing buffer at best).
+	fmt.Println("\n=== MARGINAL SENSITIVITY: rope (fixing buffer at best) ===")
+	for rope := 1; rope <= *maxRope; rope++ {
 		for _, r := range results {
-			if r.w0 == best.w0 && r.w2 == best.w2 && r.w1 == w1 {
+			if r.bufN == best.bufN && r.rope == rope {
 				marker := ""
-				if w1 == best.w1 {
+				if rope == best.rope {
 					marker = " <-- best"
 				}
-				fmt.Printf("  w1=%2d  reward=%.4f%s\n", w1, r.mean, marker)
+				fmt.Printf("  rope=%2d  reward=%.4f%s\n", rope, r.mean, marker)
 				break
 			}
 		}
 	}
 
-	// DBR structure check.
-	fmt.Println("\n=== DBR STRUCTURE ===")
-	fmt.Printf("  Best bottleneck WIP (w1): %d\n", best.w1)
-	fmt.Printf("  Best upstream WIP (w0):   %d\n", best.w0)
-	fmt.Printf("  Best downstream WIP (w2): %d\n", best.w2)
-	if best.w1 < best.w0 && best.w1 < best.w2 {
-		fmt.Println("  → Bottleneck has tightest WIP (DBR-like)")
-	} else if best.w1 > best.w0 || best.w1 > best.w2 {
-		fmt.Println("  → Bottleneck does NOT have tightest WIP")
+	// Marginal sensitivity: buffer time (fixing rope at best).
+	fmt.Println("\n=== MARGINAL SENSITIVITY: buffer time (fixing rope at best) ===")
+	for bn := 1; bn <= *bufSteps; bn++ {
+		for _, r := range results {
+			if r.rope == best.rope && r.bufN == bn {
+				marker := ""
+				if bn == best.bufN {
+					marker = " <-- best"
+				}
+				fmt.Printf("  buf=%2d×svc(%3.0f)  reward=%.4f%s\n", bn, r.bufTime, r.mean, marker)
+				break
+			}
+		}
+	}
+
+	// DBR interpretation.
+	fmt.Println("\n=== DBR INTERPRETATION ===")
+	fmt.Printf("  Best rope rate:    %d items/interval\n", best.rope)
+	fmt.Printf("  Best buffer time:  %.0f (=%d × serviceMean=%.0f)\n",
+		best.bufTime, best.bufN, constraintMean)
+	theoreticalDrum := cfg.IntervalTime / constraintMean
+	fmt.Printf("  Theoretical drum:  %.1f items/interval (interval/service_mean)\n", theoreticalDrum)
+	if float64(best.rope) >= theoreticalDrum*0.8 && float64(best.rope) <= theoreticalDrum*1.2 {
+		fmt.Println("  → Rope ≈ drum rate (DBR-aligned)")
+	} else if float64(best.rope) > theoreticalDrum*1.2 {
+		fmt.Println("  → Rope > drum rate (over-releasing)")
 	} else {
-		fmt.Println("  → Mixed / inconclusive")
+		fmt.Println("  → Rope < drum rate (under-releasing)")
 	}
 
 	// CSV output.
@@ -148,14 +178,16 @@ func main() {
 			os.Exit(1)
 		}
 		w := csv.NewWriter(f)
-		header := []string{"w0", "w1", "w2", "mean_reward", "stddev"}
+		header := []string{"rope", "buffer_time", "buffer_n", "mean_reward", "stddev"}
 		for i := range seedList {
 			header = append(header, fmt.Sprintf("seed_%d", i))
 		}
 		w.Write(header)
 		for _, r := range results {
 			row := []string{
-				strconv.Itoa(r.w0), strconv.Itoa(r.w1), strconv.Itoa(r.w2),
+				strconv.Itoa(r.rope),
+				strconv.FormatFloat(r.bufTime, 'f', 1, 64),
+				strconv.Itoa(r.bufN),
 				strconv.FormatFloat(r.mean, 'f', 6, 64),
 				strconv.FormatFloat(r.stddev, 'f', 6, 64),
 			}
@@ -172,23 +204,21 @@ func main() {
 	fmt.Fprintf(os.Stderr, "\nTotal time: %s\n", time.Since(start).Round(time.Second))
 }
 
-func evaluateStatic(cfg sim.EnvConfig, actions []int, seed uint64, warmup int) float64 {
+func evaluateStatic(cfg sim.EnvConfig, action sim.DBRAction, seed uint64, warmup int) float64 {
 	env := sim.NewEnv(cfg)
 	env.Reset(seed)
 
-	// Warmup: step but discard rewards.
 	for i := 0; i < warmup; i++ {
-		_, _, done, _ := env.Step(actions)
+		_, _, done, _ := env.Step(action)
 		if done {
-			return 0 // episode ended during warmup (shouldn't happen with MaxTime)
+			return 0
 		}
 	}
 
-	// Measurement: accumulate rewards.
 	totalReward := 0.0
 	steps := 0
 	for {
-		_, reward, done, _ := env.Step(actions)
+		_, reward, done, _ := env.Step(action)
 		totalReward += reward
 		steps++
 		if done {
@@ -198,7 +228,7 @@ func evaluateStatic(cfg sim.EnvConfig, actions []int, seed uint64, warmup int) f
 	if steps == 0 {
 		return 0
 	}
-	return totalReward / float64(steps) // average reward per step
+	return totalReward / float64(steps)
 }
 
 func meanStddev(vals []float64) (float64, float64) {
