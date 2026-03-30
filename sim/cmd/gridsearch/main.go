@@ -1,6 +1,6 @@
 // Command gridsearch evaluates all static DBR action pairs (rope × buffer time)
-// on a multi-stage DES pipeline. Reports which pairs produce the best
-// steady-state reward.
+// on a multi-stage DES pipeline. Reports decomposed metrics: throughput,
+// average WIP, average flow time, and composite reward.
 package main
 
 import (
@@ -16,6 +16,13 @@ import (
 	"codeberg.org/binaryphile/toc/sim"
 )
 
+type metrics struct {
+	throughput float64 // completions per sim-time
+	avgWIP     float64
+	avgBacklog float64
+	reward     float64
+}
+
 func main() {
 	warmup := flag.Int("warmup", 10, "warmup intervals (discarded)")
 	seeds := flag.Int("seeds", 5, "CRN seeds per vector")
@@ -23,7 +30,8 @@ func main() {
 	alpha := flag.Float64("alpha", 0.01, "WIP penalty coefficient")
 	csvFile := flag.String("csv", "", "CSV output file (all results)")
 	maxRope := flag.Int("max-rope", 20, "max rope rate")
-	bufSteps := flag.Int("buf-steps", 20, "number of buffer time steps to evaluate")
+	bufSteps := flag.Int("buf-steps", 20, "number of buffer time steps (1x to Nx serviceMean)")
+	bufSubSteps := flag.Bool("buf-sub", false, "include sub-1x buffer steps (0.01x, 0.1x, 0.5x)")
 	constraint := flag.Int("constraint", 1, "constraint stage index")
 	interval := flag.Float64("interval", 100.0, "sim-time per step")
 	flag.Parse()
@@ -42,10 +50,29 @@ func main() {
 		MaxRopeRate:     *maxRope,
 	}
 
-	// Buffer time steps: [1×serviceMean, 2×serviceMean, ..., N×serviceMean].
-	// Each step = one item's worth of constraint time.
 	constraintMean := cfg.Stages[cfg.ConstraintStage].ServiceMean
-	maxBufTime := float64(*bufSteps) * constraintMean
+
+	// Build buffer steps: optionally include sub-1x, then 1x through Nx.
+	type bufStep struct {
+		label string
+		time  float64
+	}
+	var bufStepList []bufStep
+	if *bufSubSteps {
+		bufStepList = append(bufStepList,
+			bufStep{"0.01×svc", 0.01 * constraintMean},
+			bufStep{"0.1×svc", 0.1 * constraintMean},
+			bufStep{"0.5×svc", 0.5 * constraintMean},
+		)
+	}
+	for bn := 1; bn <= *bufSteps; bn++ {
+		bufStepList = append(bufStepList, bufStep{
+			label: fmt.Sprintf("%d×svc", bn),
+			time:  float64(bn) * constraintMean,
+		})
+	}
+
+	maxBufTime := bufStepList[len(bufStepList)-1].time
 	cfg.MaxBufferTime = maxBufTime
 
 	seedList := make([]uint64, *seeds)
@@ -54,32 +81,30 @@ func main() {
 	}
 
 	type result struct {
-		rope    int
-		bufTime float64
-		bufN    int // buffer in units of constraint service times
-		mean    float64
-		stddev  float64
-		perSeed []float64
+		rope     int
+		bufLabel string
+		bufTime  float64
+		m        metrics // mean across seeds
+		mStddev  metrics // stddev across seeds
 	}
 
-	total := *maxRope * *bufSteps
+	total := *maxRope * len(bufStepList)
 	results := make([]result, 0, total)
 
 	start := time.Now()
 	done := 0
 
 	for rope := 1; rope <= *maxRope; rope++ {
-		for bn := 1; bn <= *bufSteps; bn++ {
-			bufTime := float64(bn) * constraintMean
-			action := sim.DBRAction{RopeRate: rope, BufferTime: bufTime}
-			perSeed := make([]float64, len(seedList))
+		for _, bs := range bufStepList {
+			action := sim.DBRAction{RopeRate: rope, BufferTime: bs.time}
+			perSeed := make([]metrics, len(seedList))
 
 			for si, seed := range seedList {
 				perSeed[si] = evaluateStatic(cfg, action, seed, *warmup)
 			}
 
-			mean, std := meanStddev(perSeed)
-			results = append(results, result{rope, bufTime, bn, mean, std, perSeed})
+			mean, std := metricsStats(perSeed)
+			results = append(results, result{rope, bs.label, bs.time, mean, std})
 
 			done++
 			if done%100 == 0 {
@@ -92,83 +117,72 @@ func main() {
 	}
 
 	// Sort by mean reward descending.
-	sort.Slice(results, func(i, j int) bool { return results[i].mean > results[j].mean })
+	sort.Slice(results, func(i, j int) bool { return results[i].m.reward > results[j].m.reward })
 
-	// Print top 10.
-	fmt.Println("\n=== TOP 10 ===")
+	// Print top 10 with decomposed metrics.
+	fmt.Println("\n=== TOP 10 (by reward) ===")
+	fmt.Println("  rope  buffer       throughput  avg_wip  reward")
 	for i := 0; i < 10 && i < len(results); i++ {
 		r := results[i]
-		fmt.Printf("  rope=%2d buf=%2d×svc(%.0f)  reward=%.4f ± %.4f\n",
-			r.rope, r.bufN, r.bufTime, r.mean, r.stddev)
+		fmt.Printf("  %4d  %-10s   %9.4f  %7.2f  %7.4f\n",
+			r.rope, r.bufLabel, r.m.throughput, r.m.avgWIP, r.m.reward)
 	}
 
 	// Print bottom 5.
 	fmt.Println("\n=== BOTTOM 5 ===")
 	for i := len(results) - 5; i < len(results); i++ {
+		if i < 0 {
+			continue
+		}
 		r := results[i]
-		fmt.Printf("  rope=%2d buf=%2d×svc(%.0f)  reward=%.4f ± %.4f\n",
-			r.rope, r.bufN, r.bufTime, r.mean, r.stddev)
+		fmt.Printf("  %4d  %-10s   %9.4f  %7.2f  %7.4f\n",
+			r.rope, r.bufLabel, r.m.throughput, r.m.avgWIP, r.m.reward)
 	}
 
-	// Top equivalence set (within 1 stderr of best).
+	// Find best by reward for marginal analysis.
 	best := results[0]
-	bestStderr := best.stddev / math.Sqrt(float64(len(seedList)))
-	threshold := best.mean - bestStderr
-	equivCount := 0
-	for _, r := range results {
-		if r.mean >= threshold {
-			equivCount++
-		}
-	}
-	fmt.Printf("\n=== EQUIVALENCE SET (within 1 stderr of best) ===\n")
-	fmt.Printf("  Best: rope=%d buf=%d×svc(%.0f) reward=%.4f\n",
-		best.rope, best.bufN, best.bufTime, best.mean)
-	fmt.Printf("  Threshold: %.4f (%d vectors)\n", threshold, equivCount)
 
 	// Marginal sensitivity: rope (fixing buffer at best).
-	fmt.Println("\n=== MARGINAL SENSITIVITY: rope (fixing buffer at best) ===")
+	fmt.Println("\n=== MARGINAL: rope (buffer fixed at best) ===")
+	fmt.Println("  rope  throughput  avg_wip  reward")
 	for rope := 1; rope <= *maxRope; rope++ {
 		for _, r := range results {
-			if r.bufN == best.bufN && r.rope == rope {
+			if r.bufLabel == best.bufLabel && r.rope == rope {
 				marker := ""
 				if rope == best.rope {
-					marker = " <-- best"
+					marker = " <--"
 				}
-				fmt.Printf("  rope=%2d  reward=%.4f%s\n", rope, r.mean, marker)
+				fmt.Printf("  %4d  %9.4f  %7.2f  %7.4f%s\n",
+					rope, r.m.throughput, r.m.avgWIP, r.m.reward, marker)
 				break
 			}
 		}
 	}
 
-	// Marginal sensitivity: buffer time (fixing rope at best).
-	fmt.Println("\n=== MARGINAL SENSITIVITY: buffer time (fixing rope at best) ===")
-	for bn := 1; bn <= *bufSteps; bn++ {
+	// Marginal sensitivity: buffer (fixing rope at best).
+	fmt.Println("\n=== MARGINAL: buffer (rope fixed at best) ===")
+	fmt.Println("  buffer       throughput  avg_wip  reward")
+	for _, bs := range bufStepList {
 		for _, r := range results {
-			if r.rope == best.rope && r.bufN == bn {
+			if r.rope == best.rope && r.bufLabel == bs.label {
 				marker := ""
-				if bn == best.bufN {
-					marker = " <-- best"
+				if r.bufLabel == best.bufLabel {
+					marker = " <--"
 				}
-				fmt.Printf("  buf=%2d×svc(%3.0f)  reward=%.4f%s\n", bn, r.bufTime, r.mean, marker)
+				fmt.Printf("  %-10s   %9.4f  %7.2f  %7.4f%s\n",
+					r.bufLabel, r.m.throughput, r.m.avgWIP, r.m.reward, marker)
 				break
 			}
 		}
 	}
 
-	// DBR interpretation.
-	fmt.Println("\n=== DBR INTERPRETATION ===")
-	fmt.Printf("  Best rope rate:    %d items/interval\n", best.rope)
-	fmt.Printf("  Best buffer time:  %.0f (=%d × serviceMean=%.0f)\n",
-		best.bufTime, best.bufN, constraintMean)
+	// Interpretation.
+	fmt.Println("\n=== INTERPRETATION ===")
+	fmt.Printf("  Best rope:   %d items/interval\n", best.rope)
+	fmt.Printf("  Best buffer: %s (%.1f sim-time)\n", best.bufLabel, best.bufTime)
 	theoreticalDrum := cfg.IntervalTime / constraintMean
-	fmt.Printf("  Theoretical drum:  %.1f items/interval (interval/service_mean)\n", theoreticalDrum)
-	if float64(best.rope) >= theoreticalDrum*0.8 && float64(best.rope) <= theoreticalDrum*1.2 {
-		fmt.Println("  → Rope ≈ drum rate (DBR-aligned)")
-	} else if float64(best.rope) > theoreticalDrum*1.2 {
-		fmt.Println("  → Rope > drum rate (over-releasing)")
-	} else {
-		fmt.Println("  → Rope < drum rate (under-releasing)")
-	}
+	fmt.Printf("  Theoretical: %.1f items/interval (interval/service_mean)\n", theoreticalDrum)
+	fmt.Printf("  Interval:    %.0f sim-time\n", cfg.IntervalTime)
 
 	// CSV output.
 	if *csvFile != "" {
@@ -178,21 +192,21 @@ func main() {
 			os.Exit(1)
 		}
 		w := csv.NewWriter(f)
-		header := []string{"rope", "buffer_time", "buffer_n", "mean_reward", "stddev"}
-		for i := range seedList {
-			header = append(header, fmt.Sprintf("seed_%d", i))
-		}
+		header := []string{"rope", "buffer_label", "buffer_time",
+			"mean_throughput", "mean_avg_wip", "mean_reward",
+			"std_throughput", "std_avg_wip", "std_reward"}
 		w.Write(header)
 		for _, r := range results {
 			row := []string{
 				strconv.Itoa(r.rope),
-				strconv.FormatFloat(r.bufTime, 'f', 1, 64),
-				strconv.Itoa(r.bufN),
-				strconv.FormatFloat(r.mean, 'f', 6, 64),
-				strconv.FormatFloat(r.stddev, 'f', 6, 64),
-			}
-			for _, v := range r.perSeed {
-				row = append(row, strconv.FormatFloat(v, 'f', 6, 64))
+				r.bufLabel,
+				strconv.FormatFloat(r.bufTime, 'f', 2, 64),
+				strconv.FormatFloat(r.m.throughput, 'f', 6, 64),
+				strconv.FormatFloat(r.m.avgWIP, 'f', 6, 64),
+				strconv.FormatFloat(r.m.reward, 'f', 6, 64),
+				strconv.FormatFloat(r.mStddev.throughput, 'f', 6, 64),
+				strconv.FormatFloat(r.mStddev.avgWIP, 'f', 6, 64),
+				strconv.FormatFloat(r.mStddev.reward, 'f', 6, 64),
 			}
 			w.Write(row)
 		}
@@ -204,51 +218,70 @@ func main() {
 	fmt.Fprintf(os.Stderr, "\nTotal time: %s\n", time.Since(start).Round(time.Second))
 }
 
-func evaluateStatic(cfg sim.EnvConfig, action sim.DBRAction, seed uint64, warmup int) float64 {
+func evaluateStatic(cfg sim.EnvConfig, action sim.DBRAction, seed uint64, warmup int) metrics {
 	env := sim.NewEnv(cfg)
 	env.Reset(seed)
 
 	for i := 0; i < warmup; i++ {
 		_, _, done, _ := env.Step(action)
 		if done {
-			return 0
+			return metrics{}
 		}
 	}
 
-	totalReward := 0.0
+	var totalReward, totalTP, totalWIP, totalBacklog float64
 	steps := 0
 	for {
-		_, reward, done, _ := env.Step(action)
+		_, reward, done, info := env.Step(action)
 		totalReward += reward
+		totalTP += float64(info.Completions) / info.IntervalTime
+		totalWIP += info.AvgTotalWIP
+		totalBacklog += info.AvgSourceBacklog
 		steps++
 		if done {
 			break
 		}
 	}
 	if steps == 0 {
-		return 0
+		return metrics{}
 	}
-	return totalReward / float64(steps)
+	n := float64(steps)
+	return metrics{
+		throughput: totalTP / n,
+		avgWIP:     totalWIP / n,
+		avgBacklog: totalBacklog / n,
+		reward:     totalReward / n,
+	}
 }
 
-func meanStddev(vals []float64) (float64, float64) {
+func metricsStats(vals []metrics) (mean, stddev metrics) {
 	n := float64(len(vals))
 	if n == 0 {
-		return 0, 0
+		return
 	}
-	sum := 0.0
 	for _, v := range vals {
-		sum += v
+		mean.throughput += v.throughput
+		mean.avgWIP += v.avgWIP
+		mean.avgBacklog += v.avgBacklog
+		mean.reward += v.reward
 	}
-	mean := sum / n
+	mean.throughput /= n
+	mean.avgWIP /= n
+	mean.avgBacklog /= n
+	mean.reward /= n
 
-	sumSq := 0.0
-	for _, v := range vals {
-		d := v - mean
-		sumSq += d * d
-	}
 	if n <= 1 {
-		return mean, 0
+		return
 	}
-	return mean, math.Sqrt(sumSq / (n - 1))
+	for _, v := range vals {
+		stddev.throughput += (v.throughput - mean.throughput) * (v.throughput - mean.throughput)
+		stddev.avgWIP += (v.avgWIP - mean.avgWIP) * (v.avgWIP - mean.avgWIP)
+		stddev.avgBacklog += (v.avgBacklog - mean.avgBacklog) * (v.avgBacklog - mean.avgBacklog)
+		stddev.reward += (v.reward - mean.reward) * (v.reward - mean.reward)
+	}
+	stddev.throughput = math.Sqrt(stddev.throughput / (n - 1))
+	stddev.avgWIP = math.Sqrt(stddev.avgWIP / (n - 1))
+	stddev.avgBacklog = math.Sqrt(stddev.avgBacklog / (n - 1))
+	stddev.reward = math.Sqrt(stddev.reward / (n - 1))
+	return
 }
