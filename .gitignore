@@ -2,6 +2,8 @@ bin/
 go.work
 go.work.sum
 drum-demo
+gridsearch
 queue-demo
+simenv
 tee-demo
 tocdemo
