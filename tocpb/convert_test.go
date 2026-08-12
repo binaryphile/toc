@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"codeberg.org/binaryphile/toc/core"
-	"codeberg.org/binaryphile/toc/tocpb"
+	"github.com/binaryphile/toc/core"
+	"github.com/binaryphile/toc/tocpb"
 	"google.golang.org/protobuf/proto"
 )
 

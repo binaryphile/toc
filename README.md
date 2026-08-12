@@ -3,7 +3,7 @@
 Theory of Constraints Drum-Buffer-Rope pipeline engine for Go.
 
 ```go
-import "codeberg.org/binaryphile/toc"
+import "github.com/binaryphile/toc"
 ```
 
 ## What it does

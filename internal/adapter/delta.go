@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"time"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 // stageState holds the previous poll's metrics and staleness counter

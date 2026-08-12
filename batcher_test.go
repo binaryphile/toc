@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/binaryphile/fluentfp/rslt"
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 func TestBatcherHappyPath(t *testing.T) {

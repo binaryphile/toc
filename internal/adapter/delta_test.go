@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 var discardLogger = slog.New(slog.DiscardHandler)

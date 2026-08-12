@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 // mockStarter records start calls and allows controlling behavior.

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/binaryphile/fluentfp/memctl"
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 func memRopeTestPipeline(headWeight, midWeight int64) (*toc.Pipeline, *toc.LimitManager) {

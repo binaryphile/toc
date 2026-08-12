@@ -1,4 +1,4 @@
-module codeberg.org/binaryphile/toc
+module github.com/binaryphile/toc
 
 go 1.26.1
 

@@ -3,7 +3,7 @@ package toc
 import (
 	"time"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 // Adapt converts a pair of consecutive [Stats] snapshots into a

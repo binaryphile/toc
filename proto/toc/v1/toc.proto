@@ -1,6 +1,6 @@
 // Canonical TOC observation and diagnosis model.
 //
-// Maps to Go types in codeberg.org/binaryphile/toc/core.
+// Maps to Go types in github.com/binaryphile/toc/core.
 // Cross-language consumers (Java/Pepin, Perl/Ventus) use this schema
 // for NATS transport and sidecar adapters.
 //
@@ -11,7 +11,7 @@ syntax = "proto3";
 
 package toc.v1;
 
-option go_package = "codeberg.org/binaryphile/toc/tocpb";
+option go_package = "github.com/binaryphile/toc/tocpb";
 
 // StageObservation is the canonical input to the analyzer.
 // One per stage per analysis window.

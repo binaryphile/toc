@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"codeberg.org/binaryphile/toc/sim"
+	"github.com/binaryphile/toc/sim"
 )
 
 type metrics struct {

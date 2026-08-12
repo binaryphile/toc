@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/binaryphile/toc/internal/adapter"
+	"github.com/binaryphile/toc/internal/adapter"
 )
 
 var discardLogger = slog.New(slog.DiscardHandler)

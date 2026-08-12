@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"codeberg.org/binaryphile/toc/internal/adapter"
-	"codeberg.org/binaryphile/toc/internal/adapter/restsource"
-	"codeberg.org/binaryphile/toc/natstransport"
+	"github.com/binaryphile/toc/internal/adapter"
+	"github.com/binaryphile/toc/internal/adapter/restsource"
+	"github.com/binaryphile/toc/natstransport"
 	"github.com/nats-io/nats.go"
 )
 

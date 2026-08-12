@@ -3,7 +3,7 @@ package toc
 import (
 	"context"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 // ObservationBatch is the transport envelope for a set of stage

@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/binaryphile/fluentfp/memctl"
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 func TestBudgetAllocatorBasic(t *testing.T) {

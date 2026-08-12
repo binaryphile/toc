@@ -3,7 +3,7 @@ package sim_test
 import (
 	"testing"
 
-	"codeberg.org/binaryphile/toc/sim"
+	"github.com/binaryphile/toc/sim"
 )
 
 func baseConfig() sim.EnvConfig {

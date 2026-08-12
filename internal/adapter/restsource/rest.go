@@ -9,7 +9,7 @@ import (
 	"math"
 	"net/http"
 
-	"codeberg.org/binaryphile/toc/internal/adapter"
+	"github.com/binaryphile/toc/internal/adapter"
 	"github.com/tidwall/gjson"
 )
 

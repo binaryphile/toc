@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 // benchSink prevents dead-code elimination in benchmark worker fns.

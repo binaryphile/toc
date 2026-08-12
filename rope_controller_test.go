@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 // ropeTestPipeline builds a frozen linear pipeline head → mid → drum

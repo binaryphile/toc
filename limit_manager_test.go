@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 func TestLimitManagerCountMin(t *testing.T) {

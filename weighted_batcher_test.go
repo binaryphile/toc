@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/binaryphile/fluentfp/rslt"
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 // weightOf returns the item itself as the weight (for int items).

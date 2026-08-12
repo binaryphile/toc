@@ -22,7 +22,7 @@ import (
 	"log"
 
 	"github.com/binaryphile/fluentfp/rslt"
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 // WriteResult captures the outcome of a write operation.

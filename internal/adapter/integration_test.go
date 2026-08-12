@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
-	"codeberg.org/binaryphile/toc/core"
-	"codeberg.org/binaryphile/toc/internal/adapter"
+	"github.com/binaryphile/toc"
+	"github.com/binaryphile/toc/core"
+	"github.com/binaryphile/toc/internal/adapter"
 )
 
 // mockSource returns canned StageMetrics per poll invocation.

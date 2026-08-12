@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"math"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 // ObservationToProto converts a core.StageObservation to its proto form.

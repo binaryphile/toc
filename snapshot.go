@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 // PipelineSnapshot is an atomic point-in-time capture of all pipeline

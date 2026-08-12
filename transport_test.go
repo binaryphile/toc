@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc"
+	"github.com/binaryphile/toc/core"
 )
 
 // mockPublisher records calls to PublishObservations.

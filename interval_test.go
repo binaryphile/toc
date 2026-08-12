@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 func TestDeltaHappyPath(t *testing.T) {

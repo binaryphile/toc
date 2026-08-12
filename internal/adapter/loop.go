@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc"
+	"github.com/binaryphile/toc/core"
 )
 
 // Run executes the poll loop. It polls sources at cfg.PollInterval

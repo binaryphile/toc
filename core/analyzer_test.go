@@ -3,7 +3,7 @@ package core_test
 import (
 	"testing"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 // obs builds a StageObservation with full mask and the given work ratios.

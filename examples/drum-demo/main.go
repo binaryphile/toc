@@ -25,7 +25,7 @@ import (
 	"syscall"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 // ── Domain types ────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 const (

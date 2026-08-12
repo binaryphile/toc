@@ -3,7 +3,7 @@ package toc_test
 import (
 	"testing"
 
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 func TestClassifyStep(t *testing.T) {

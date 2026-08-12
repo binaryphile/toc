@@ -12,7 +12,7 @@ import (
 	"math"
 	"os"
 
-	"codeberg.org/binaryphile/toc/sim"
+	"github.com/binaryphile/toc/sim"
 )
 
 const (

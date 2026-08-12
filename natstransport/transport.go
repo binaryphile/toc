@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"codeberg.org/binaryphile/toc"
-	"codeberg.org/binaryphile/toc/tocpb"
+	"github.com/binaryphile/toc"
+	"github.com/binaryphile/toc/tocpb"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 )

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"codeberg.org/binaryphile/toc/core"
+	"github.com/binaryphile/toc/core"
 )
 
 // PublishErrorHandler is called when a publish attempt fails.

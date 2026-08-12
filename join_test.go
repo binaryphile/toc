@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/binaryphile/fluentfp/rslt"
-	"codeberg.org/binaryphile/toc"
+	"github.com/binaryphile/toc"
 )
 
 // helpers
