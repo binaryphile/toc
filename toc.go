@@ -1074,14 +1074,30 @@ func (s *Stage[T, R]) grantWaitersLocked() {
 	for s.waiters.Len() > 0 && s.admitted < int64(s.maxWIP) {
 		e := s.waiters.Front()
 		w := e.Value.(*waiter)
+		grantAsOversize := false
 		if !w.oversizeExempt && !s.weightAllows(w.weight) {
-			break // FIFO head-of-line blocking: heavy item blocks lighter ones
+			// weightAllows can never pass for an item whose own weight
+			// exceeds maxWIPWeight (w.weight > maxWIPWeight implies
+			// maxWIPWeight - admittedWeight < w.weight for any
+			// admittedWeight >= 0), so a waiter that missed the
+			// acquireAdmission fast-path exemption because debt existed
+			// at submission time would otherwise never be granted, even
+			// after that debt fully clears — contradicting OversizeAllow's
+			// documented "subsequent oversize items block like
+			// OversizeWait ... until debt clears" contract. Re-run the
+			// same no-debt exemption check acquireAdmission's fast path
+			// uses, now that this waiter is at the front of the queue.
+			if s.oversizePolicy == OversizeAllow && w.weight > s.maxWIPWeight && s.admittedWeight <= s.maxWIPWeight {
+				grantAsOversize = true
+			} else {
+				break // FIFO head-of-line blocking: heavy item blocks lighter ones
+			}
 		}
 		s.waiters.Remove(e)
 		w.elem = nil // mark as granted — removeWaiter will see nil
 		s.admitted++
 		s.admittedWeight += w.weight
-		if w.oversizeExempt {
+		if w.oversizeExempt || grantAsOversize {
 			s.oversizeAdmissions.Add(1)
 		}
 		close(w.ready)

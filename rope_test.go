@@ -826,6 +826,12 @@ func TestOversizeAllowAdmitsImmediately(t *testing.T) {
 	s.Wait()
 }
 
+// TestOversizeAllowBoundedDebt verifies both halves of OversizeAllow's debt
+// contract: a second oversize item blocks WHILE debt exists (checked well
+// before slowFn's 50ms completes, so the assertion doesn't race slowFn's own
+// timing), and is granted once that debt clears (era#45731 / toc grant-time
+// fix — a queued oversize waiter is no longer stuck forever once the item
+// ahead of it in the FIFO completes).
 func TestOversizeAllowBoundedDebt(t *testing.T) {
 	ctx := context.Background()
 	s := toc.Start(ctx, slowFn, toc.Options[int]{
@@ -852,8 +858,19 @@ func TestOversizeAllowBoundedDebt(t *testing.T) {
 	select {
 	case err := <-done:
 		t.Fatalf("second oversize should block while debt exists, got %v", err)
-	case <-time.After(50 * time.Millisecond):
-		// Expected: blocked.
+	case <-time.After(10 * time.Millisecond):
+		// Expected: still blocked well before slowFn's 50ms completes.
+	}
+
+	// Once the first item finishes (~50ms) and debt clears, the second
+	// oversize item must be granted, not stuck forever.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("second oversize not admitted cleanly once debt cleared: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("second oversize never admitted after debt cleared -- permanent deadlock")
 	}
 
 	s.CloseInput()
