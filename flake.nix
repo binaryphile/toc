@@ -13,7 +13,8 @@
           inherit system;
         };
       in {
-        devShells.default = pkgs.mkShellNoCC {
+        # mkShell, not mkShellNoCC: go test -race needs cgo, so a C compiler.
+        devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             go
             git
